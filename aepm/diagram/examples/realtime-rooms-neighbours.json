@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "id": "realtime-rooms-neighbours",
+  "title": "Realtime rooms: connected example",
+  "status": "example",
+  "view": "component",
+  "focus": "rooms",
+  "definitions": [
+    {
+      "id": "rooms", "name": "Realtime rooms", "kind": "component", "status": "proposed", "package": "ourapps-ae/realtime-rooms", "version": "0.1.0",
+      "ports": [
+        {"id": "rules", "name": "Rules contract", "direction": "input", "kind": "interface", "type": "ae/game-rules", "version": "1.0.0", "required": true, "cardinality": "one"},
+        {"id": "metrics", "name": "Optional room observer", "direction": "input", "kind": "interface", "type": "ae/room-observer", "version": "1.0.0", "required": false, "cardinality": "many"},
+        {"id": "session", "name": "Room session", "direction": "output", "kind": "interface", "type": "ae/room-session", "version": "1.0.0"}
+      ],
+      "settings": [
+        {"id": "idleMinutes", "name": "Idle timeout (minutes)", "type": "number", "required": true, "secret": false, "default": 30},
+        {"id": "signingKey", "name": "Room signing key", "type": "string", "required": true, "secret": true}
+      ]
+    },
+    {
+      "id": "rules", "name": "Example game rules", "kind": "application", "status": "example", "revision": "0.1.0",
+      "ports": [
+        {"id": "rules", "name": "Game rules", "direction": "output", "kind": "interface", "type": "ae/game-rules", "version": "1.0.0"}
+      ],
+      "settings": [
+        {"id": "variant", "name": "Game variant", "type": "string", "required": true, "secret": false, "default": "illustrative poker rules"}
+      ]
+    },
+    {
+      "id": "client", "name": "Example room client", "kind": "component", "status": "example", "package": "ourapps-ae/example-room-client", "version": "0.1.0",
+      "ports": [
+        {"id": "room", "name": "Join and observe room", "direction": "input", "kind": "interface", "type": "ae/room-session", "version": "1.0.0", "required": true, "cardinality": "one"}
+      ],
+      "settings": [
+        {"id": "platform", "name": "Target platform", "type": "string", "required": true, "secret": false}
+      ]
+    }
+  ],
+  "instances": [
+    {"id": "rules", "name": "Example game-rules neighbour", "definition": "rules", "configuration": {}},
+    {"id": "rooms", "name": "Realtime rooms", "definition": "rooms", "configuration": {"signingKey": {"secretRef": "example/room-key"}}},
+    {"id": "phone", "name": "Example phone-client neighbour", "definition": "client", "configuration": {"platform": "phone"}},
+    {"id": "browser", "name": "Example browser-client neighbour", "definition": "client", "configuration": {"platform": "browser"}}
+  ],
+  "connections": [
+    {"source": {"instance": "rules", "port": "rules"}, "target": {"instance": "rooms", "port": "rules"}},
+    {"source": {"instance": "rooms", "port": "session"}, "target": {"instance": "phone", "port": "room"}},
+    {"source": {"instance": "rooms", "port": "session"}, "target": {"instance": "browser", "port": "room"}}
+  ]
+}

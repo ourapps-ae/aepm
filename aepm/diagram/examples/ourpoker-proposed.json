@@ -1,0 +1,90 @@
+{
+  "schemaVersion": 1,
+  "id": "ourpoker-proposed",
+  "title": "OurPoker",
+  "status": "proposed",
+  "view": "application",
+  "definitions": [
+    {
+      "id": "poker-rules", "name": "Poker game rules", "kind": "application", "status": "example", "revision": "0.1.0",
+      "ports": [
+        {"id": "rules", "name": "Game rules", "direction": "output", "kind": "interface", "type": "ae/game-rules", "version": "1.0.0"}
+      ],
+      "settings": [
+        {"id": "variant", "name": "Game variant", "type": "string", "required": true, "secret": false},
+        {"id": "seats", "name": "Maximum seats", "type": "number", "required": true, "secret": false, "default": 8}
+      ]
+    },
+    {
+      "id": "rooms", "name": "Realtime rooms", "kind": "component", "status": "proposed", "package": "ourapps-ae/realtime-rooms", "version": "0.1.0",
+      "ports": [
+        {"id": "rules", "name": "Rules contract", "direction": "input", "kind": "interface", "type": "ae/game-rules", "version": "1.0.0", "required": true, "cardinality": "one"},
+        {"id": "metrics", "name": "Optional room observer", "direction": "input", "kind": "interface", "type": "ae/room-observer", "version": "1.0.0", "required": false, "cardinality": "many"},
+        {"id": "session", "name": "Room session", "direction": "output", "kind": "interface", "type": "ae/room-session", "version": "1.0.0"}
+      ],
+      "settings": [
+        {"id": "idleMinutes", "name": "Idle timeout (minutes)", "type": "number", "required": true, "secret": false, "default": 30},
+        {"id": "signingKey", "name": "Room signing key", "type": "string", "required": true, "secret": true}
+      ]
+    },
+    {
+      "id": "clients", "name": "Poker client shell", "kind": "component", "status": "proposed", "package": "ourapps-ae/game-client", "version": "0.1.0",
+      "ports": [
+        {"id": "room", "name": "Join and observe room", "direction": "input", "kind": "interface", "type": "ae/room-session", "version": "1.0.0", "required": true, "cardinality": "one"},
+        {"id": "words", "name": "Translated messages", "direction": "input", "kind": "setting", "type": "ae/message-catalog", "version": "1.0.0", "required": true, "cardinality": "one"},
+        {"id": "updates", "name": "Approved update feed", "direction": "input", "kind": "interface", "type": "ae/update-feed", "version": "1.0.0", "required": true, "cardinality": "one"},
+        {"id": "video", "name": "Optional table video", "direction": "input", "kind": "interface", "type": "ae/video-session", "version": "1.0.0", "required": false, "cardinality": "one"}
+      ],
+      "settings": [
+        {"id": "platform", "name": "Target platform", "type": "string", "required": true, "secret": false},
+        {"id": "sound", "name": "Sound enabled", "type": "boolean", "required": false, "secret": false, "default": true}
+      ]
+    },
+    {
+      "id": "translations", "name": "Translation catalog", "kind": "component", "status": "proposed", "package": "ourapps-ae/translations", "version": "0.1.0",
+      "ports": [
+        {"id": "words", "name": "Message catalog", "direction": "output", "kind": "setting", "type": "ae/message-catalog", "version": "1.0.0"}
+      ],
+      "settings": [
+        {"id": "locales", "name": "Included languages", "type": "string", "required": true, "secret": false, "default": "English, French"}
+      ]
+    },
+    {
+      "id": "updates", "name": "Approved app updates", "kind": "component", "status": "proposed", "package": "ourapps-ae/app-updates", "version": "0.1.0",
+      "ports": [
+        {"id": "feed", "name": "Approved releases", "direction": "output", "kind": "interface", "type": "ae/update-feed", "version": "1.0.0"}
+      ],
+      "settings": [
+        {"id": "channel", "name": "Release channel", "type": "string", "required": true, "secret": false, "default": "friends"}
+      ]
+    },
+    {
+      "id": "video", "name": "Example video provider", "kind": "service", "status": "example", "revision": "0.1.0",
+      "ports": [
+        {"id": "session", "name": "Table video session", "direction": "output", "kind": "interface", "type": "ae/video-session", "version": "1.0.0"}
+      ],
+      "settings": [
+        {"id": "mode", "name": "Service mode", "type": "string", "required": true, "secret": false, "default": "illustrative only"}
+      ]
+    }
+  ],
+  "instances": [
+    {"id": "rules", "name": "OurPoker rules", "definition": "poker-rules", "configuration": {"variant": "Texas Hold'em"}},
+    {"id": "rooms", "name": "Shared table rooms", "definition": "rooms", "configuration": {"signingKey": {"secretRef": "ourpoker/room-signing-key"}}},
+    {"id": "phone", "name": "Phone client with accessible controls for friends and family", "definition": "clients", "configuration": {"platform": "phone"}},
+    {"id": "browser", "name": "Browser client", "definition": "clients", "configuration": {"platform": "browser", "sound": false}},
+    {"id": "translations", "name": "Shared translations", "definition": "translations", "configuration": {}},
+    {"id": "updates", "name": "Approved updates", "definition": "updates", "configuration": {}},
+    {"id": "video", "name": "Optional video service", "definition": "video", "configuration": {}}
+  ],
+  "connections": [
+    {"source": {"instance": "rules", "port": "rules"}, "target": {"instance": "rooms", "port": "rules"}},
+    {"source": {"instance": "rooms", "port": "session"}, "target": {"instance": "phone", "port": "room"}},
+    {"source": {"instance": "rooms", "port": "session"}, "target": {"instance": "browser", "port": "room"}},
+    {"source": {"instance": "translations", "port": "words"}, "target": {"instance": "phone", "port": "words"}},
+    {"source": {"instance": "translations", "port": "words"}, "target": {"instance": "browser", "port": "words"}},
+    {"source": {"instance": "updates", "port": "feed"}, "target": {"instance": "phone", "port": "updates"}},
+    {"source": {"instance": "updates", "port": "feed"}, "target": {"instance": "browser", "port": "updates"}},
+    {"source": {"instance": "video", "port": "session"}, "target": {"instance": "phone", "port": "video"}}
+  ]
+}
