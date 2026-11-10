@@ -54,7 +54,7 @@ def check_report(report, lock, assembly_digest, manifests, context="application"
 
 def retained_manifests(root, policy):
     from .bundle import source_tree_digest, validate_extracted_mode
-    from .trust import verify
+    from .trust import RELEASE, archive_name, purl, verify
 
     root = Path(root)
     assembly = read_assembly(root)
@@ -64,11 +64,16 @@ def retained_manifests(root, policy):
         manifest = validate_component(load(package_root / "component.json"))
         payloads = {item["path"]: rooted(package_root, item["path"]).read_bytes() for item in manifest["files"]}
         receipts = root / ".aepm/receipts" / ref["digest"]
-        release = verify((receipts / "release.json").read_bytes(), (receipts / "release.sig").read_bytes(), "release", Path(policy))
+        release, _ = verify((receipts / "release.dsse.json").read_bytes(), "release", Path(policy), RELEASE)
         identity = manifest["identity"]
-        if any(release[key] != ref[key] for key in ("name", "version", "digest")) or any(identity[key] != ref[key] for key in ("name", "version")):
+        released = release["subject"][0]
+        if (released["digest"]["sha256"] != ref["digest"] or released["name"] != archive_name(ref["name"], ref["version"])
+                or release["predicate"]["releaseId"] != ref["name"]
+                or release["predicate"]["purl"] != purl(ref["name"], ref["version"], manifest["kind"])
+                or any(identity[key] != ref[key] for key in ("name", "version"))):
             fail("retained-identity", "packages")
-        if source_tree_digest(manifest, payloads) != release["sourceTreeDigest"] or identity["sourceTreeDigest"] != release["sourceTreeDigest"]:
+        source = released["annotations"]["sourceTreeDigest"]
+        if source_tree_digest(manifest, payloads) != source or identity["sourceTreeDigest"] != source:
             fail("retained-source", "packages")
         files = {item["path"] for item in snapshot(package_root) if item["kind"] == "file"}
         if files != set(payloads) | {"component.json"}:

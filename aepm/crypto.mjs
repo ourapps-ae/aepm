@@ -7,7 +7,7 @@ try {
   if (request.operation === 'public') {
     const key = createPublicKey(request.key);
     if (key.asymmetricKeyType !== 'ed25519') throw new Error('key-type');
-    process.stdout.write(key.export({ type: 'spki', format: 'der' }).toString('base64'));
+    process.stdout.write(Buffer.from(key.export({ format: 'jwk' }).x, 'base64url').toString('base64'));
   } else {
     const data = Buffer.from(request.data, 'base64');
     if (request.operation === 'sign') {

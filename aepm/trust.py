@@ -6,7 +6,7 @@ import base64
 import os
 import re
 import time
-from typing import cast
+from typing import Any, cast
 from pathlib import Path
 import subprocess
 
@@ -21,6 +21,20 @@ from .model import (boolean, bounded_text, execution_document, execution_origin,
 
 ROLES = ("release", "guardian", "owner")
 SCOPES = ("required-local", "platform", "deployed")
+PAYLOAD_TYPE = "application/vnd.in-toto+json"
+STATEMENT_TYPE = "https://in-toto.io/Statement/v1"
+RELEASE = "https://in-toto.io/attestation/release/v0.1"
+REVIEW = "https://slsa.dev/verification_summary/v1"
+UPDATE_APPROVAL = "https://ourapps.app/attestation/update-approval/v1"
+EXECUTION_AUTHORIZATION = "https://ourapps.app/attestation/execution-authorization/v1"
+PREDICATES = {"release": (RELEASE,), "guardian": (REVIEW,), "owner": (UPDATE_APPROVAL, EXECUTION_AUTHORIZATION)}
+GUARDIAN_VERIFIER = "https://ourapps.app/verifier/aepm-guardian-review"
+GUARDIAN_POLICY = "https://ourapps.app/policy/aepm-guardian-review/v1"
+SCOPE_LEVELS = {"required-local": "AEPM_REQUIRED_LOCAL", "platform": "AEPM_PLATFORM", "deployed": "AEPM_DEPLOYED"}
+DEPENDENCY_LEVEL = "AEPM_RELEASED"
+UPDATE_BINDINGS = ("application", "previousLockDigest", "nextLockDigest", "configurationDigest", "designDigest",
+                   "assemblyDigest", "reportDigest", "snapshotDigest", "stageDigest")
+ENVELOPE_LIMIT = 1024 * 1024
 
 
 def _crypto(operation: str, key: str, data: bytes = b"", signature: bytes = b"") -> bytes:
@@ -37,6 +51,24 @@ def _crypto(operation: str, key: str, data: bytes = b"", signature: bytes = b"")
     return result.stdout
 
 
+def key_id(key: str) -> str:
+    """DSSE keyid: SHA-256 of the raw 32-byte Ed25519 public key (from a public or private PEM key)."""
+    raw = base64.b64decode(_crypto("public", key), validate=True)
+    if len(raw) != 32:
+        fail("invalid-key", "signature")
+    return digest(raw)
+
+
+def pae(payload_type: str, body: bytes) -> bytes:
+    """DSSE v1 pre-authentication encoding."""
+    kind = payload_type.encode("utf-8")
+    return b"DSSEv1 %d %s %d %s" % (len(kind), kind, len(body), body)
+
+
+def _role_keys(policy: dict) -> dict[str, list[tuple[str, str]]]:
+    return {role: [(key_id(key["publicKey"]), key["publicKey"]) for key in policy["keys"][role]] for role in ROLES}
+
+
 @guarded
 def load_policy(path: Path) -> dict:
     from .bundle import ordinary_path
@@ -45,14 +77,12 @@ def load_policy(path: Path) -> dict:
     if type(policy["format"]) is not int or policy["format"] != 1:
         fail("invalid-format", "policy")
     keys = fields(policy["keys"], "release guardian owner", "policy.keys")
-    identities, material = [], []
+    material = []
     for role in ROLES:
         for key in array(keys[role], "policy.keys." + role, True):
-            fields(key, "id publicKey", "policy.keys")
-            identities.append(text(key["id"], "policy.keys.id"))
+            fields(key, "publicKey", "policy.keys")
             text(key["publicKey"], "policy.keys.publicKey")
-            material.append(_crypto("public", key["publicKey"]))
-    unique(identities, "policy.keys.id")
+            material.append(key_id(key["publicKey"]))
     unique(material, "policy.keys.publicKey")
     for value in array(policy["trustedExecution"], "policy.trustedExecution"):
         sha256(value, "policy.trustedExecution")
@@ -60,97 +90,273 @@ def load_policy(path: Path) -> dict:
     return policy
 
 
-def validate_statement(statement: object, role: str) -> dict:
-    choice(role, ROLES, "role")
-    if role == "owner" and type(statement) is dict and statement.get("format") == 2:
-        return validate_execution_authorization(statement)
-    extra = {
-        "release": "name version digest sourceTreeDigest",
-        "guardian": "name version digest dependencies previousReviewedDigest scope verdict reportDigest",
-        "owner": "application previousLockDigest nextLockDigest configurationDigest designDigest assemblyDigest reportDigest proposalDigest snapshotDigest stageDigest",
-    }[role]
-    s = fields(statement, "format role keyId " + extra, "statement")
-    if type(s["format"]) is not int or s["format"] != 1 or s["role"] != role:
-        fail("statement-role", "statement")
-    text(s["keyId"], "statement.keyId")
-    if role in ("release", "guardian"):
-        name(s["name"], "statement.name")
-        version(s["version"], "statement.version")
-        sha256(s["digest"], "statement.digest")
-    for key in extra.split():
-        if key.endswith("Digest") and not (key == "previousReviewedDigest" and s[key] is None):
-            sha256(s[key], "statement." + key)
-    if role == "guardian":
-        for dep in array(s["dependencies"], "statement.dependencies"):
-            sha256(dep, "statement.dependencies")
-        unique(s["dependencies"], "statement.dependencies")
-        if s["dependencies"] != sorted(s["dependencies"]):
-            fail("unsorted-dependencies", "statement")
-        for scope in array(s["scope"], "statement.scope", True):
-            choice(scope, SCOPES, "statement.scope")
-        unique(s["scope"], "statement.scope")
-        choice(s["verdict"], ("accepted",), "statement.verdict")
-    if role == "owner":
-        text(s["application"], "statement.application")
+def purl(package_name: str, package_version: str, kind: str) -> str:
+    from .bom import purl as package_url
+    return package_url(package_name, package_version, kind)
+
+
+def archive_name(package_name: str, package_version: str) -> str:
+    return package_name.split("/", 1)[1] + "-" + package_version + ".tar"
+
+
+def _subject(statement: dict, count: int = 1) -> list:
+    subjects = array(statement["subject"], "statement.subject", True)
+    if len(subjects) != count:
+        fail("invalid-fields", "statement.subject")
+    for item in subjects:
+        fields(item, "name digest", "statement.subject", "annotations")
+        text(item["name"], "statement.subject.name")
+        sha256(fields(item["digest"], "sha256", "statement.subject.digest")["sha256"], "statement.subject.digest")
+    return subjects
+
+
+def _timestamp_text(value: object, path: str) -> str:
+    if type(value) is not str or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", value):
+        fail("invalid-time", path)
+    try:
+        time.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        fail("invalid-time", path)
+    return value
+
+
+def validate_statement(statement: object, predicate_type: str) -> dict:
+    """An in-toto Statement v1 carrying exactly one of aepm's four predicates."""
+    choice(predicate_type, (RELEASE, REVIEW, UPDATE_APPROVAL, EXECUTION_AUTHORIZATION), "predicateType")
+    s = fields(statement, "_type subject predicateType predicate", "statement")
+    if s["_type"] != STATEMENT_TYPE:
+        fail("statement-type", "statement._type")
+    if s["predicateType"] != predicate_type:
+        fail("statement-role", "statement.predicateType")
+    subject = _subject(s)[0]
+    p = s["predicate"]
+    if predicate_type == RELEASE:
+        fields(subject, "name digest annotations", "statement.subject")
+        sha256(fields(subject["annotations"], "sourceTreeDigest", "statement.subject.annotations")["sourceTreeDigest"],
+               "statement.subject.annotations.sourceTreeDigest")
+        fields(p, "purl releaseId", "statement.predicate")
+        identity = re.fullmatch(r"pkg:github/ourapps-ae/([a-z][a-z0-9-]*)@v([0-9]+\.[0-9]+\.[0-9]+)", text(p["purl"], "statement.predicate.purl"))
+        if identity is None:
+            fail("invalid-value", "statement.predicate.purl")
+        name(p["releaseId"], "statement.predicate.releaseId")
+        version(identity.group(2), "statement.predicate.purl")
+        return s
+    if "annotations" in subject:
+        fail("invalid-fields", "statement.subject")
+    if predicate_type == REVIEW:
+        fields(p, "verifier timeVerified resourceUri policy inputAttestations verificationResult verifiedLevels dependencyLevels slsaVersion",
+               "statement.predicate")
+        if fields(p["verifier"], "id", "statement.predicate.verifier")["id"] != GUARDIAN_VERIFIER:
+            fail("invalid-value", "statement.predicate.verifier")
+        _timestamp_text(p["timeVerified"], "statement.predicate.timeVerified")
+        text(p["resourceUri"], "statement.predicate.resourceUri")
+        if fields(p["policy"], "uri", "statement.predicate.policy")["uri"] != GUARDIAN_POLICY:
+            fail("invalid-value", "statement.predicate.policy")
+        inputs = array(p["inputAttestations"], "statement.predicate.inputAttestations", True)
+        if len(inputs) != 1:
+            fail("invalid-fields", "statement.predicate.inputAttestations")
+        fields(inputs[0], "name digest", "statement.predicate.inputAttestations")
+        if inputs[0]["name"] != "review-report":
+            fail("invalid-value", "statement.predicate.inputAttestations")
+        sha256(fields(inputs[0]["digest"], "sha256", "statement.predicate.inputAttestations.digest")["sha256"],
+               "statement.predicate.inputAttestations.digest")
+        choice(p["verificationResult"], ("PASSED",), "statement.predicate.verificationResult")
+        levels = array(p["verifiedLevels"], "statement.predicate.verifiedLevels", True)
+        for level in levels:
+            choice(level, tuple(SCOPE_LEVELS.values()), "statement.predicate.verifiedLevels")
+        if levels != sorted(set(levels)):
+            fail("unsorted-dependencies", "statement.predicate.verifiedLevels")
+        count = fields(p["dependencyLevels"], DEPENDENCY_LEVEL, "statement.predicate.dependencyLevels")[DEPENDENCY_LEVEL]
+        if integer(count, "statement.predicate.dependencyLevels") < 0:
+            fail("invalid-value", "statement.predicate.dependencyLevels")
+        choice(p["slsaVersion"], ("1.0",), "statement.predicate.slsaVersion")
+        return s
+    if predicate_type == UPDATE_APPROVAL:
+        if subject["name"] != "proposal.json":
+            fail("invalid-value", "statement.subject.name")
+        fields(p, " ".join(UPDATE_BINDINGS), "statement.predicate")
+        text(p["application"], "statement.predicate.application")
+        for key in UPDATE_BINDINGS[1:]:
+            sha256(p[key], "statement.predicate." + key)
+        return s
+    if subject["name"] != "assembly":
+        fail("invalid-value", "statement.subject.name")
+    validate_execution_authorization({**p, "keyId": "0" * 64, "assemblyDigest": subject["digest"]["sha256"]})
     return s
 
 
+def authorization_view(statement: dict, signer: str) -> dict:
+    """The fields an execution authorization grants, with the signing key and authorized assembly."""
+    return validate_execution_authorization({**statement["predicate"], "keyId": signer,
+                                             "assemblyDigest": statement["subject"][0]["digest"]["sha256"]})
+
+
+def release_statement(ref: PackageRef, component: dict) -> dict:
+    return {"_type": STATEMENT_TYPE,
+            "subject": [{"name": archive_name(ref["name"], ref["version"]), "digest": {"sha256": ref["digest"]},
+                         "annotations": {"sourceTreeDigest": component["identity"]["sourceTreeDigest"]}}],
+            "predicateType": RELEASE,
+            "predicate": {"purl": purl(ref["name"], ref["version"], component["kind"]), "releaseId": ref["name"]}}
+
+
+def review_statement(ref: PackageRef, kind: str, report_digest: str, scopes: list, dependency_count: int,
+                     verified_at: str | None = None) -> dict:
+    return {"_type": STATEMENT_TYPE,
+            "subject": [{"name": archive_name(ref["name"], ref["version"]), "digest": {"sha256": ref["digest"]}}],
+            "predicateType": REVIEW,
+            "predicate": {"verifier": {"id": GUARDIAN_VERIFIER},
+                          "timeVerified": verified_at or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                          "resourceUri": purl(ref["name"], ref["version"], kind),
+                          "policy": {"uri": GUARDIAN_POLICY},
+                          "inputAttestations": [{"name": "review-report", "digest": {"sha256": report_digest}}],
+                          "verificationResult": "PASSED",
+                          "verifiedLevels": sorted(SCOPE_LEVELS[scope] for scope in scopes),
+                          "dependencyLevels": {DEPENDENCY_LEVEL: dependency_count},
+                          "slsaVersion": "1.0"}}
+
+
+def approval_statement(proposal_digest: str, bindings: dict) -> dict:
+    return {"_type": STATEMENT_TYPE, "subject": [{"name": "proposal.json", "digest": {"sha256": proposal_digest}}],
+            "predicateType": UPDATE_APPROVAL, "predicate": {key: bindings[key] for key in UPDATE_BINDINGS}}
+
+
+def authorization_statement(request: dict) -> dict:
+    predicate = {key: value for key, value in request.items() if key != "assemblyDigest"}
+    return {"_type": STATEMENT_TYPE, "subject": [{"name": "assembly", "digest": {"sha256": request["assemblyDigest"]}}],
+            "predicateType": EXECUTION_AUTHORIZATION, "predicate": predicate}
+
+
+def _b64decode(value: object, path: str) -> bytes:
+    if type(value) is not str:
+        fail("invalid-envelope", path)
+    """Standard or URL-safe base64, padded or not, as DSSE requires verifiers to accept."""
+    try:
+        if ("-" in value or "_" in value) and ("+" in value or "/" in value):
+            raise ValueError("mixed alphabets")
+        normal = value.replace("-", "+").replace("_", "/")
+        return base64.b64decode(normal + "=" * (-len(normal) % 4), validate=True)
+    except (ValueError, UnicodeError):
+        fail("invalid-envelope", path)
+
+
 @guarded
-def sign(statement: dict, role: str, private_key: Path) -> bytes:
-    validate_statement(statement, role)
+def sign(statement: dict, role: str, private_key: Path) -> dict:
+    """A DSSE envelope over the statement, signed with an Ed25519 private key."""
+    choice(role, ROLES, "role")
+    if type(statement) is not dict or statement.get("predicateType") not in PREDICATES[role]:
+        fail("statement-role", "statement.predicateType")
+    validate_statement(statement, statement["predicateType"])
     from .bundle import ordinary_path
     ordinary_path(private_key)
     try:
         key = private_key.read_text(encoding="utf-8")
     except (OSError, UnicodeError):
         fail("read-failed", "private-key")
-    message = b"aepm/" + role.encode() + b"/" + str(statement["format"]).encode() + b"\n" + canonical(statement)
-    return base64.b64decode(_crypto("sign", key, message), validate=True)
+    payload = canonical(statement)
+    signature = _crypto("sign", key, pae(PAYLOAD_TYPE, payload))
+    return {"payload": base64.b64encode(payload).decode("ascii"), "payloadType": PAYLOAD_TYPE,
+            "signatures": [{"keyid": key_id(key), "sig": signature.decode("ascii")}]}
 
 
 @guarded
-def verify(statement_bytes: bytes, signature: bytes, role: str, policy: Path) -> dict:
+def verify(envelope_bytes: bytes, role: str, policy: Path, predicate_type: str) -> tuple[dict, str]:
+    """Verify a DSSE envelope from a pinned role key; return the statement and the signing keyid."""
     choice(role, ROLES, "role")
-    if len(signature) != 64 or len(statement_bytes) > 1024 * 1024:
+    if predicate_type not in PREDICATES[role]:
+        fail("statement-role", "predicateType")
+    if len(envelope_bytes) > ENVELOPE_LIMIT:
+        fail("metadata-limit", "envelope")
+    envelope = fields(loads(envelope_bytes, "envelope"), "payload payloadType signatures", "envelope")
+    if canonical(envelope) != envelope_bytes:
+        fail("noncanonical-envelope", "envelope")
+    if envelope["payloadType"] != PAYLOAD_TYPE:
+        fail("payload-type", "envelope.payloadType")
+    payload = _b64decode(envelope["payload"], "envelope.payload")
+    signatures = array(envelope["signatures"], "envelope.signatures", True)
+    if len(signatures) > 8:
+        fail("metadata-limit", "envelope.signatures")
+    keys = _role_keys(load_policy(policy))[role]
+    message = pae(PAYLOAD_TYPE, payload)
+    signer = None
+    for item in signatures:
+        fields(item, "keyid sig", "envelope.signatures")
+        sha256(item["keyid"], "envelope.signatures.keyid")
+        signature = _b64decode(item["sig"], "envelope.signatures.sig")
+        if len(signature) != 64:
+            fail("invalid-signature", "signature")
+        for identifier, public in keys:
+            if _crypto("verify", public, message, signature) == b"true":
+                if item["keyid"] != identifier:
+                    fail("key-id-mismatch", "envelope.signatures.keyid")
+                signer = identifier
+    if signer is None:
         fail("invalid-signature", "signature")
-    pinned = load_policy(policy)
-    matched = []
-    for domain_version in ((1, 2) if role == "owner" else (1,)):
-        message = b"aepm/" + role.encode() + b"/" + str(domain_version).encode() + b"\n" + statement_bytes
-        matched.extend((key["id"], domain_version) for key in pinned["keys"][role]
-                       if _crypto("verify", key["publicKey"], message, signature) == b"true")
-    if not matched:
-        fail("invalid-signature", "signature")
-    statement = validate_statement(loads(statement_bytes, "statement"), role)
-    if canonical(statement) != statement_bytes:
+    statement = loads(payload, "statement")
+    if canonical(statement) != payload:
         fail("noncanonical-statement", "statement")
-    if (statement["keyId"], statement["format"]) not in matched:
-        fail("key-id-mismatch", "statement")
+    return validate_statement(statement, predicate_type), signer
+
+
+@guarded
+def publish_release(store: Path, ref: PackageRef, private_key: Path) -> dict:
+    """Sign the release attestation for a stored archive and place it beside the archive's other statements."""
+    from .bundle import read_package
+    from .io import write
+    component, _ = read_package(ref, Path(store))
+    statement = release_statement(ref, component)
+    write(Path(store) / "statements" / ref["digest"] / "release.dsse.json", sign(statement, "release", Path(private_key)))
     return statement
+
+
+@guarded
+def publish_review(store: Path, ref: PackageRef, report: dict, private_key: Path) -> dict:
+    """Sign the guardian's verification summary for a reviewed archive and its complete review report."""
+    from .bundle import read_package
+    from .io import write
+    component, _ = read_package(ref, Path(store))
+    scopes = sorted({suite["scope"] for suite in report["suites"]})
+    dependencies = len([item for item in report["packages"] if item["digest"] != ref["digest"]])
+    statement = review_statement(ref, component["kind"], digest(canonical(report)), scopes, dependencies)
+    write(Path(store) / "statements" / ref["digest"] / "guardian.dsse.json", sign(statement, "guardian", Path(private_key)))
+    return statement
+
+
+def review_report_digest(envelope: Path, policy: Path) -> str:
+    """The review report digest a stored guardian attestation names."""
+    statement, _ = verify(Path(envelope).read_bytes(), "guardian", policy, REVIEW)
+    return statement["predicate"]["inputAttestations"][0]["digest"]["sha256"]
 
 
 def _stored_statement(ref: PackageRef, store: Path, role: str, policy: Path) -> dict:
     from .bundle import ordinary_path
     package_ref(ref)
-    directory = store / "statements" / ref["digest"]
-    path, signature = directory / (role + ".json"), directory / (role + ".sig")
+    path = store / "statements" / ref["digest"] / (role + ".dsse.json")
     ordinary_path(path)
-    ordinary_path(signature)
-    if path.stat().st_size > 1024 * 1024 or signature.stat().st_size != 64:
-        fail("invalid-signature", role)
-    statement = verify(path.read_bytes(), signature.read_bytes(), role, policy)
-    if any(statement[k] != ref[k] for k in ("name", "version", "digest")):
+    if path.stat().st_size > ENVELOPE_LIMIT:
+        fail("metadata-limit", role)
+    statement, _ = verify(path.read_bytes(), role, policy, PREDICATES[role][0])
+    subject = statement["subject"][0]
+    if subject["digest"]["sha256"] != ref["digest"] or subject["name"] != archive_name(ref["name"], ref["version"]):
         fail("statement-binding", role)
     return statement
+
+
+def check_release(statement: dict, ref: PackageRef, component: Any) -> None:
+    """The release statement names exactly this archive, identity, kind and source tree."""
+    subject = statement["subject"][0]
+    if (subject["digest"]["sha256"] != ref["digest"] or subject["name"] != archive_name(ref["name"], ref["version"])
+            or statement["predicate"]["purl"] != purl(ref["name"], ref["version"], component["kind"])
+            or statement["predicate"]["releaseId"] != ref["name"]):
+        fail("statement-binding", "release")
+    if subject["annotations"]["sourceTreeDigest"] != component["identity"]["sourceTreeDigest"]:
+        fail("statement-binding", "release.sourceTreeDigest")
 
 
 @guarded
 def verify_release(ref: PackageRef, store: Path, policy: Path) -> None:
     from .bundle import read_package
     component, _ = read_package(ref, store)
-    release = _stored_statement(ref, store, "release", policy)
-    if release["sourceTreeDigest"] != component["identity"]["sourceTreeDigest"]:
-        fail("statement-binding", "release.sourceTreeDigest")
+    check_release(_stored_statement(ref, store, "release", policy), ref, component)
 
 
 @guarded
@@ -180,22 +386,27 @@ def review_bindings(ref: PackageRef, store: Path) -> dict:
 def verify_package(ref: PackageRef, store: Path, policy: Path) -> None:
     from .bundle import ordinary_path
     verify_release(ref, store, policy)
-    guardian = _stored_statement(ref, store, "guardian", policy)
+    guardian = _stored_statement(ref, store, "guardian", policy)["predicate"]
     binding = review_bindings(ref, store)
-    dependencies = sorted(p["digest"] for p in binding["packages"] if p["digest"] != ref["digest"])
-    if guardian["dependencies"] != dependencies:
+    from .bundle import read_package
+    component, _ = read_package(ref, store)
+    if guardian["resourceUri"] != purl(ref["name"], ref["version"], component["kind"]):
+        fail("statement-binding", "guardian")
+    dependencies = [p["digest"] for p in binding["packages"] if p["digest"] != ref["digest"]]
+    if guardian["dependencyLevels"][DEPENDENCY_LEVEL] != len(dependencies):
         fail("guardian-dependencies", "guardian")
     for p in binding["packages"]:
         verify_release(cast(PackageRef, {k: p[k] for k in ("name", "version", "digest")}), store, policy)
-    scopes = sorted({s["scope"] for s in binding["suites"]})
-    if guardian["scope"] != scopes:
+    scopes = sorted(SCOPE_LEVELS[s["scope"]] for s in {s["scope"]: s for s in binding["suites"]}.values())
+    if guardian["verifiedLevels"] != scopes:
         fail("guardian-scope", "guardian")
-    report_path = store / "reports" / (guardian["reportDigest"] + ".json")
+    report_digest = guardian["inputAttestations"][0]["digest"]["sha256"]
+    report_path = store / "reports" / (report_digest + ".json")
     ordinary_path(report_path)
     if report_path.stat().st_size > 1024 * 1024:
         fail("metadata-limit", "report")
     data = report_path.read_bytes()
-    if digest(data) != guardian["reportDigest"]:
+    if digest(data) != report_digest:
         fail("report-digest", "report")
     report = loads(data, "report")
     if data != canonical(report):
@@ -265,6 +476,21 @@ def validate_report_evidence(report: dict, binding: dict, context: str,
         _validate_execution_evidence(report, binding, evidence_root, policy, adoption,
                                      int(time.time()) if now is None else integer(now, "now"))
     return report
+
+
+def retained_authorization(root, identifier, policy):
+    """Verify a retained execution authorization envelope named by the digest of its bytes."""
+    from .bundle import ordinary_path
+    sha256(identifier, "authorizations")
+    path = root / "authorizations" / (identifier + ".json")
+    ordinary_path(path)
+    if not path.is_file() or path.stat().st_nlink != 1 or path.stat().st_size > ENVELOPE_LIMIT:
+        fail("unsafe-file", "authorizations")
+    data = path.read_bytes()
+    if digest(data) != identifier:
+        fail("evidence-digest", "authorizations")
+    statement, signer = verify(data, "owner", policy, EXECUTION_AUTHORIZATION)
+    return authorization_view(statement, signer)
 
 
 def _retained_document(root, folder, identifier):
@@ -541,14 +767,7 @@ def _validate_execution_evidence(report, binding, root, policy, adoption, now):
     descriptor = authorization = None
     if run["contextDigest"] is not None:
         descriptor = validate_execution_context(_retained_document(root, "contexts", run["contextDigest"]))
-        authorization = _retained_document(root, "authorizations", run["authorizationDigest"])
-        from .bundle import ordinary_path
-        signature_path = root / "authorizations" / (run["authorizationDigest"] + ".sig")
-        ordinary_path(signature_path)
-        if signature_path.stat().st_size != 64:
-            fail("invalid-signature", "authorization")
-        verify(canonical(authorization), signature_path.read_bytes(), "owner", policy)
-        validate_execution_authorization(authorization)
+        authorization = retained_authorization(root, run["authorizationDigest"], policy)
         for key in ("runId", "contextDigest"):
             if authorization[key] != run[key]:
                 fail("authorization-binding", key)

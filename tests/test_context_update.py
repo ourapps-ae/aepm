@@ -12,7 +12,7 @@ from aepm.environment import clock
 from aepm.io import load, snapshot, write
 from aepm.model import AepmError, canonical, digest
 from aepm.test_identities import generate
-from aepm.trust import sign, verify_package
+from aepm.trust import EXECUTION_AUTHORIZATION, publish_release, publish_review, verify, verify_package
 from aepm.update import propose, approve, apply
 from aepm.verification import review_package
 from tests.test_application import source
@@ -50,23 +50,15 @@ class ContextUpdateTests(unittest.TestCase):
                 ref = pack(directory, store)
                 refs.append(ref)
                 actual, _ = read_package(ref, store)
-                statement = {"format": 1, "role": "release", "keyId": "local-release", **ref,
-                             "sourceTreeDigest": actual["identity"]["sourceTreeDigest"]}
                 statements = store / "statements" / ref["digest"]
                 statements.mkdir(parents=True)
-                write(statements / "release.json", statement)
-                (statements / "release.sig").write_bytes(sign(statement, "release", root / "keys/release.pem"))
+                publish_release(store, ref, root / "keys/release.pem")
             policy["trustedExecution"] = [ref["digest"] for ref in refs]
             write(policy_path, policy)
             for ref in refs:
                 report = review_package(ref, store, policy_path, True)
                 self.assertEqual(report["summary"]["required-local"], "passed", report)
-                statement = {"format": 1, "role": "guardian", "keyId": "local-guardian", **ref, "dependencies": [],
-                             "previousReviewedDigest": None, "scope": sorted({item["scope"] for item in report["suites"]}),
-                             "verdict": "accepted", "reportDigest": digest(canonical(report))}
-                path = store / "statements" / ref["digest"]
-                write(path / "guardian.json", statement)
-                (path / "guardian.sig").write_bytes(sign(statement, "guardian", root / "keys/guardian.pem"))
+                publish_review(store, ref, report, root / "keys/guardian.pem")
                 verify_package(ref, store, policy_path)
             definition = {"format": 1, "id": "context-app", "title": "Context App", "recipe": {"name": "ourapps-ae/recipe", "version": "0.1.0"},
                           "components": [{"id": "sample", "name": "ourapps-ae/sample", "version": "0.1.0", "configuration": {}}],
@@ -83,7 +75,7 @@ class ContextUpdateTests(unittest.TestCase):
                             "settings": {"expectedUpdateVersion": "1.2.3"}, "resources": [],
                             "secrets": {"livekitKey": {"secretRef": "test-key", "version": "1"}}})
             write(secret_file, {"format": 1, "values": {"test-key": {"version": "1", "value": "SYNTHETIC"}}})
-            request, authorization, state = root / "request.json", root / "authorization", root / "state"
+            request, authorization, state = root / "request.json", root / "authorization.dsse.json", root / "state"
             execution_request(app=preview, context=context, policy=policy_path, execution_state=state, expires_at=clock() + 600, out=request)
             authorize_execution(request, root / "keys/owner.pem", policy_path, authorization)
             proposal = propose(app, definition, store, policy_path, True, execution_context=context,
@@ -92,15 +84,11 @@ class ContextUpdateTests(unittest.TestCase):
             write(proposal_path, proposal)
             approval = approve(proposal_path, root / "keys/owner.pem", policy_path)
             before = snapshot(app)
-            expires = load(authorization / "authorization.json")["expiresAt"]
+            expires = verify(authorization.read_bytes(), "owner", policy_path, EXECUTION_AUTHORIZATION)[0]["predicate"]["expiresAt"]
             with patch("aepm.trust.time.time", return_value=expires), self.assertRaises(AepmError):
                 apply(app, proposal_path, approval, policy_path)
             self.assertEqual(snapshot(app), before)
-            wrong = root / "wrong-purpose"
-            wrong.mkdir()
-            shutil.copyfile(authorization / "authorization.json", wrong / "owner.json")
-            shutil.copyfile(authorization / "authorization.sig", wrong / "owner.sig")
-            with self.assertRaisesRegex(AepmError, "owner-binding"):
-                apply(app, proposal_path, wrong, policy_path)
+            with self.assertRaisesRegex(AepmError, "statement-role"):
+                apply(app, proposal_path, authorization, policy_path)
             result = apply(app, proposal_path, approval, policy_path)
             self.assertEqual(result["lock"], lock)

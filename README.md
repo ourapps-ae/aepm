@@ -7,8 +7,9 @@ Run `python3 -m aepm --help` from this directory. For other working directories,
 ```sh
 python3 -m aepm pack SOURCE --store STORE
 python3 -m aepm inspect DIGEST --store STORE
+python3 -m aepm bom DIGEST --store STORE --out NAME-VERSION.cdx.json
 python3 -m aepm resolve DEFINITION --catalogue STORE/catalogue.json --out LOCK
-python3 -m aepm sign STATEMENT --role release --key KEY --out SIG
+python3 -m aepm sign STATEMENT --role release --key KEY --out ENVELOPE
 python3 -m aepm review DIGEST --store STORE --policy POLICY --trusted
 python3 -m aepm install DEFINITION --lock LOCK --store STORE --policy POLICY --target APP
 python3 -m aepm verify APP --policy POLICY --trusted
@@ -21,7 +22,20 @@ python3 -m aepm recover APP
 
 Every digest and signature covers RFC 8785 canonical JSON (`aepm.model.canonical`); integers outside plus or minus 2^53-1 are refused. `identity.licence` is an SPDX licence expression.
 
-Installation runs no package code. Release and guardian signatures must exist before installation. Review runs before guardian signing. A guardian signs the immutable review report digest, dependency digests and complete declared scope set. Reports preserve required-local, platform and deployed partitions.
+Installation runs no package code. Release and guardian attestations must exist before installation. Review runs before guardian signing. Reports preserve required-local, platform and deployed partitions.
+
+`bom` writes a CycloneDX 1.6 JSON bill of materials for a stored archive: the package as `metadata.component` (type `library`, or `application` for a recipe) with purl `pkg:github/ourapps-ae/<repo>@v<version>` (`<repo>` is the package name, with `-recipe` added for recipes), its SPDX licence expression and the archive's SHA-256; one `file` component with its SHA-256 per packaged file; and the declared package dependencies.
+
+Every signature is a DSSE envelope (`payloadType` `application/vnd.in-toto+json`, Ed25519, `keyid` the SHA-256 of the raw 32-byte public key) over an in-toto Statement v1 whose single subject is `{name, digest: {sha256}}`. The policy pins `publicKey` entries per role; the three role key sets must be disjoint, and each role signs only its own predicates:
+
+| Role | Predicate | Subject | What it binds |
+|---|---|---|---|
+| release | `https://in-toto.io/attestation/release/v0.1` | `<name>-<version>.tar`, the archive digest; annotation `sourceTreeDigest` | `purl` and `releaseId` (the package name) |
+| guardian | SLSA Verification Summary `https://slsa.dev/verification_summary/v1` | the archive | `verifier.id`, `resourceUri` (the purl), `policy.uri`, `verificationResult` `PASSED`, the review report digest in `inputAttestations`, one `verifiedLevels` entry per reviewed scope (`AEPM_REQUIRED_LOCAL`, `AEPM_PLATFORM`, `AEPM_DEPLOYED`), the dependency count in `dependencyLevels.AEPM_RELEASED` |
+| owner | `https://ourapps.app/attestation/update-approval/v1` | `proposal.json`, the proposal digest | application, lock, configuration, design, assembly, report, snapshot and stage digests |
+| owner | `https://ourapps.app/attestation/execution-authorization/v1` | `assembly`, the assembly digest | run, context, policy, lock and suite-set digests, execution state, granted suites, validity window |
+
+A store keeps `statements/<digest>/release.dsse.json` and `guardian.dsse.json`; `sign` takes an in-toto Statement and writes its envelope. `aepm.trust.publish_release` and `publish_review` write both from an archive and a review report. Verification accepts standard or URL-safe base64, requires the canonical (RFC 8785) payload and envelope, a signature from a key pinned for the role whose `keyid` names that key, and exactly the expected predicate; the guardian's dependency count, scope levels and report digest must match the archive's own review binding, and the report binds the exact dependency digests. `approve` writes one envelope (`APPROVAL`), as does `authorize-execution` (`AUTHORIZATION`).
 
 Verification requires explicit `--trusted` and every archive digest in the external policy's `trustedExecution`. `review`, `verify` and `propose-update` accept `--allow-network` for declared network preparation. Each suite receives a fresh writable copy, private home and cache paths and a credential-free environment. Package suites use their retained package root; application suites use the full generated tree. Installed tools must match their declared version or version prefix. Preparation logs are separate entries in each suite's content-addressed log index. This is trusted execution, not an operating-system sandbox: trusted code can access the host filesystem and network. Deployed checks remain blocked without authorization.
 

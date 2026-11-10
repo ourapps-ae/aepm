@@ -233,7 +233,7 @@ def claim_key(authorization):
 class Execution:
     def __init__(self, binding, policy, evidence_root, *, execution_context=None, authorization=None,
                  execution_state=None, secrets=None, allow_live=False, forbidden_roots=()):
-        from .trust import load_policy, verify
+        from .trust import EXECUTION_AUTHORIZATION, authorization_view, load_policy, verify
         self.binding, self.policy, self.root = binding, Path(policy), Path(evidence_root)
         self.context = self.authorization = None
         self.values = {}
@@ -250,10 +250,12 @@ class Execution:
             self.context = validate_execution_context(load(execution_context))
             if self.context["pathPlatform"] != path_platform():
                 fail("unsupported-host", "context.pathPlatform")
+            from .bundle import ordinary_path
             authorization = Path(authorization)
-            data, signature = (authorization / "authorization.json").read_bytes(), (authorization / "authorization.sig").read_bytes()
-            value = verify(data, signature, "owner", self.policy)
-            self.authorization = validate_execution_authorization(value)
+            ordinary_path(authorization)
+            data = authorization.read_bytes()
+            statement, signer = verify(data, "owner", self.policy, EXECUTION_AUTHORIZATION)
+            value = self.authorization = authorization_view(statement, signer)
             self.context_digest, self.authorization_digest = digest(canonical(self.context)), digest(data)
             for key in ("lockDigest", "assemblyDigest", "suiteSetDigest"):
                 if value[key] != binding[key]:
@@ -304,9 +306,7 @@ class Execution:
                     fail("secret-unavailable", "secrets")
                 self.values = material["values"]
             immutable(self.root / "contexts" / (self.context_digest + ".json"), self.context)
-            immutable(self.root / "authorizations" / (self.authorization_digest + ".json"), value)
-            signature_path = self.root / "authorizations" / (self.authorization_digest + ".sig")
-            immutable_blob(signature_path, signature)
+            immutable_blob(self.root / "authorizations" / (self.authorization_digest + ".json"), data)
         elif secrets is not None or allow_live:
             fail("context-invalid", "execution-options")
 

@@ -286,11 +286,12 @@ def assemble(definition: Definition, lock: Lock, store: Path, destination: Path,
             shutil.copyfile(Path(store) / "objects" / (ref["digest"] + ".tar"), archive_root / (ref["digest"] + ".tar"))
             receipts = root / ".aepm/receipts" / ref["digest"]
             receipts.mkdir(parents=True)
-            for filename in ("release.json", "release.sig", "guardian.json", "guardian.sig"):
+            for filename in ("release.dsse.json", "guardian.dsse.json"):
                 shutil.copyfile(Path(store) / "statements" / ref["digest"] / filename, receipts / filename)
-            guardian = load(receipts / "guardian.json")
-            report = load(Path(store) / "reports" / (guardian["reportDigest"] + ".json"))
-            write(root / ".aepm/evidence/reports" / (guardian["reportDigest"] + ".json"), report)
+            from .trust import review_report_digest
+            report_digest = review_report_digest(receipts / "guardian.dsse.json", Path(policy))
+            report = load(Path(store) / "reports" / (report_digest + ".json"))
+            write(root / ".aepm/evidence/reports" / (report_digest + ".json"), report)
             if report["format"] == 2:
                 for folder, key in (("contexts", "contextDigest"), ("authorizations", "authorizationDigest"), ("execution-evidence", "evidenceDigest")):
                     value = report["execution"][key]
@@ -298,8 +299,6 @@ def assemble(definition: Definition, lock: Lock, store: Path, destination: Path,
                         directory = root / ".aepm/evidence" / folder
                         directory.mkdir(parents=True, exist_ok=True)
                         shutil.copyfile(Path(store) / folder / (value + ".json"), directory / (value + ".json"))
-                        if folder == "authorizations":
-                            shutil.copyfile(Path(store) / folder / (value + ".sig"), directory / (value + ".sig"))
             is_recipe = ref["name"] == recipe_name
             if (manifest["kind"] == "recipe") != is_recipe:
                 fail("recipe-identity", "packages")

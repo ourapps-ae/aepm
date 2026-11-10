@@ -13,7 +13,7 @@ from aepm.environment import clock
 from aepm.io import load, write
 from aepm.model import AepmError, canonical, digest
 from aepm.test_identities import generate
-from aepm.trust import sign, review_bindings, validate_report_evidence, verify_package
+from aepm.trust import publish_release, publish_review, review_bindings, sign, validate_report_evidence, verify_package
 from aepm.verification import review_package
 from tests.core.test_core import fixture
 
@@ -84,12 +84,9 @@ class RecipeUpdateContextTests(unittest.TestCase):
                 ref = pack(package, store)
                 refs.append(ref)
                 actual, _ = read_package(ref, store)
-                release = {"format": 1, "role": "release", "keyId": "local-release", **ref,
-                           "sourceTreeDigest": actual["identity"]["sourceTreeDigest"]}
                 statements = store / "statements" / ref["digest"]
                 statements.mkdir(parents=True)
-                write(statements / "release.json", release)
-                (statements / "release.sig").write_bytes(sign(release, "release", root / "keys/release.pem"))
+                publish_release(store, ref, root / "keys/release.pem")
             policy["trustedExecution"] = [ref["digest"] for ref in refs]
             write(policy_path, policy)
             reports = []
@@ -121,11 +118,8 @@ class RecipeUpdateContextTests(unittest.TestCase):
                     if suite["id"] != "unit":
                         self.assertEqual(suite["kind"], "simulation")
                         self.assertTrue(all(assertion["passed"] for assertion in suite["assertions"]))
-                guardian = {"format": 1, "role": "guardian", "keyId": "local-guardian", **ref, "dependencies": [],
-                            "previousReviewedDigest": None, "scope": ["deployed", "required-local"], "verdict": "accepted", "reportDigest": digest(canonical(report))}
                 statements = store / "statements" / ref["digest"]
-                write(statements / "guardian.json", guardian)
-                (statements / "guardian.sig").write_bytes(sign(guardian, "guardian", root / "keys/guardian.pem"))
+                publish_review(store, ref, report, root / "keys/guardian.pem")
                 verify_package(ref, store, policy_path)
                 retained_context = store / "contexts" / (report["execution"]["contextDigest"] + ".json")
                 original = retained_context.read_bytes()

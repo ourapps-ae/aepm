@@ -12,8 +12,8 @@ from aepm.bundle import extract_review, pack, validate_extracted_mode, validate_
 from aepm.model import (AepmError, canonical, digest, execution_document, validate_absolute_path,
                         validate_component, validate_execution_assertions,
                         validate_execution_context)
-from aepm.trust import (review_bindings, sign, validate_report_evidence,
-                        validate_statement, verify, verify_package)
+from aepm.trust import (EXECUTION_AUTHORIZATION, RELEASE, UPDATE_APPROVAL, authorization_statement, key_id, pae,
+                        review_bindings, sign, validate_report_evidence, validate_statement, verify, verify_package)
 from tests.core import test_core as core
 
 
@@ -57,7 +57,7 @@ class ExecutionEvidenceTests(unittest.TestCase):
             self.descriptor["resources"] = [{"id": name, "kind": "directory", "path": "/absent/" + name, "digest": "a" * 64, "executables": []}
                                             for name in ("androidJavaHome", "androidSdk")]
         self.context_digest = self.retain("contexts", self.descriptor) if authorized else None
-        self.authorization = {"format": 2, "role": "owner", "keyId": "owner-test", "purpose": "verification-authorization",
+        self.authorization = {"keyId": key_id(self.keys["owner"]["publicKey"]),
                               "runId": self.run_id, "contextDigest": self.context_digest, "policyDigest": digest(canonical(json.loads(self.policy.read_text()))),
                               "executionState": {"path": "C:\\proof\\execution-state" if windows else str(self.registry), "id": "2" * 64, "pathPlatform": self.descriptor["pathPlatform"]},
                               "context": "review", **{k: self.binding[k] for k in ("lockDigest", "assemblyDigest", "suiteSetDigest")},
@@ -105,10 +105,12 @@ class ExecutionEvidenceTests(unittest.TestCase):
         (target / (identifier + ".json")).write_bytes(data)
         return identifier
 
+    def authorization_envelope(self):
+        request = {key: value for key, value in self.authorization.items() if key != "keyId"}
+        return sign(authorization_statement(request), "owner", self.root / "owner.pem")
+
     def retain_authorization(self):
-        identifier = self.retain("authorizations", self.authorization)
-        (self.store / "authorizations" / (identifier + ".sig")).write_bytes(sign(self.authorization, "owner", self.root / "owner.pem"))
-        return identifier
+        return self.retain("authorizations", self.authorization_envelope())
 
     def publish(self):
         self.report["execution"]["evidenceDigest"] = self.retain("execution-evidence", self.evidence)
@@ -119,11 +121,11 @@ class ExecutionEvidenceTests(unittest.TestCase):
     def completion(self):
         self.registry.mkdir(exist_ok=True)
         (self.registry / "registry.json").write_bytes(canonical({"format": 1, "id": "2" * 64}))
-        key = digest(canonical({"keyId": "owner-test", "runId": self.run_id}))
-        claim = {"format": 1, "keyId": "owner-test", "runId": self.run_id,
+        key = digest(canonical({"keyId": self.authorization["keyId"], "runId": self.run_id}))
+        claim = {"format": 1, "keyId": self.authorization["keyId"], "runId": self.run_id,
                  "authorizationDigest": self.report["execution"]["authorizationDigest"],
                  **{k: self.authorization[k] for k in ("contextDigest", "policyDigest", "lockDigest", "assemblyDigest", "suiteSetDigest")}, "claimedAt": 1001}
-        completion = {"format": 1, "keyId": "owner-test", "runId": self.run_id,
+        completion = {"format": 1, "keyId": self.authorization["keyId"], "runId": self.run_id,
                       "authorizationDigest": self.report["execution"]["authorizationDigest"], "reportDigest": digest(canonical(self.report)),
                       "evidenceDigest": self.report["execution"]["evidenceDigest"], "completedAt": 1004}
         for directory, value in (("claims", claim), ("completions", completion)):
@@ -141,8 +143,8 @@ class ExecutionEvidenceTests(unittest.TestCase):
         core.fixture(ordinary_source, "ordinary")
         ordinary_ref = pack(ordinary_source, self.store)
         release = self.release(ordinary_ref)
-        signature = sign(release, "release", self.root / "release.pem")
-        self.assertEqual(verify(canonical(release), signature, "release", self.policy), release)
+        envelope = sign(release, "release", self.root / "release.pem")
+        self.assertEqual(verify(canonical(envelope), "release", self.policy, RELEASE)[0], release)
         ordinary_report = core.CoreTests.report(self, ordinary_ref)
         self.guardian(ordinary_ref, ordinary_report)
         verify_package(ordinary_ref, self.store, self.policy)
@@ -151,20 +153,27 @@ class ExecutionEvidenceTests(unittest.TestCase):
 
     def test_owner_domain_and_purpose_separation(self):
         self.build()
-        signature = sign(self.authorization, "owner", self.root / "owner.pem")
-        self.assertEqual(verify(canonical(self.authorization), signature, "owner", self.policy), self.authorization)
+        envelope = canonical(self.authorization_envelope())
+        statement, signer = verify(envelope, "owner", self.policy, EXECUTION_AUTHORIZATION)
+        self.assertEqual((statement["predicateType"], signer), (EXECUTION_AUTHORIZATION, self.authorization["keyId"]))
+        self.assertEqual(statement["subject"], [{"name": "assembly", "digest": {"sha256": self.binding["assemblyDigest"]}}])
         with self.assertRaises(AepmError):
-            verify(canonical(self.authorization), signature, "guardian", self.policy)
-        bad = {**self.authorization, "purpose": "update-approval"}
+            verify(envelope, "guardian", self.policy, "https://slsa.dev/verification_summary/v1")
+        with self.assertRaisesRegex(AepmError, "statement-role"):
+            verify(envelope, "owner", self.policy, UPDATE_APPROVAL)
+        bad = {**statement, "predicateType": UPDATE_APPROVAL}
         with self.assertRaises(AepmError):
             sign(bad, "owner", self.root / "owner.pem")
         from aepm.trust import _crypto
-        import base64
-        wrong_domain = base64.b64decode(_crypto("sign", self.keys["owner"]["privateKey"], b"aepm/owner/1\n" + canonical(self.authorization)))
+        payload = canonical(statement)
+        envelope_value = json.loads(envelope)
+        for message in (payload, pae("application/json", payload), b"aepm/owner/2\n" + payload):
+            forged = {**envelope_value, "signatures": [{**envelope_value["signatures"][0],
+                                                        "sig": _crypto("sign", self.keys["owner"]["privateKey"], message).decode()}]}
+            with self.subTest(message=message[:16]), self.assertRaises(AepmError):
+                verify(canonical(forged), "owner", self.policy, EXECUTION_AUTHORIZATION)
         with self.assertRaises(AepmError):
-            verify(canonical(self.authorization), wrong_domain, "owner", self.policy)
-        with self.assertRaises(AepmError):
-            validate_statement(self.authorization, "release")
+            validate_statement(statement, RELEASE)
 
     def test_report_downgrade_and_missing_evidence(self):
         self.build()

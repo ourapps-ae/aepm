@@ -24,7 +24,7 @@ def parser():
     root = Parser(description=__doc__)
     commands = root.add_subparsers(dest="command", required=True)
     specifications = {
-        "pack": ("source", ("store",)), "inspect": ("digest", ("store",)),
+        "pack": ("source", ("store",)), "inspect": ("digest", ("store",)), "bom": ("digest", ("store", "out")),
         "resolve": ("definition", ("catalogue", "out")), "sign": ("statement", ("role", "key", "out")),
         "install": ("definition", ("lock", "store", "policy", "target")),
         "verify": ("app", ("policy",)), "review": ("digest", ("store", "policy")),
@@ -98,19 +98,20 @@ def dispatch(args):
         return pack(Path(args.source), Path(args.store))
     if command == "inspect":
         return read_package(reference(args.digest, args.store), Path(args.store))[0]
+    if command == "bom":
+        from .bom import bill_of_materials
+        document = bill_of_materials(reference(args.digest, args.store), Path(args.store))
+        write(args.out, document)
+        return {"bom": str(Path(args.out)), "components": len(document["components"])}
     if command == "resolve":
         definition = validate_definition(load(args.definition))
         result = resolve(requirements(definition), Path(args.catalogue), definition["id"], digest(canonical(definition)))
         write(args.out, result)
         return result
     if command == "sign":
-        signature = sign(load(args.statement), args.role, Path(args.key))
-        output = Path(args.out)
-        if output.is_symlink():
-            fail("symlink", "signature")
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_bytes(signature)
-        return {"signature": str(output)}
+        envelope = sign(load(args.statement), args.role, Path(args.key))
+        write(args.out, envelope)
+        return {"envelope": str(Path(args.out))}
     if command == "install":
         return assemble(validate_definition(load(args.definition)), load(args.lock), Path(args.store), Path(args.target), Path(args.policy))
     if command == "verify":
@@ -132,8 +133,8 @@ def dispatch(args):
         if source.absolute() != destination.absolute():
             if destination.exists() or destination.is_symlink():
                 fail("approval-output-exists", "approval")
-            shutil.copytree(source, destination)
-        return {"statement": str(destination / "owner.json"), "signature": str(destination / "owner.sig")}
+            shutil.copyfile(source, destination)
+        return {"approval": str(destination)}
     if command == "apply":
         from .update import apply
         return apply(Path(args.app), Path(args.proposal), Path(args.approval), Path(args.policy))

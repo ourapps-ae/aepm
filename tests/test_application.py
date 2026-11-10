@@ -17,7 +17,8 @@ from aepm.export import export_design
 from aepm.io import load, snapshot, write
 from aepm.model import AepmError, canonical, digest
 from aepm.test_identities import generate
-from aepm.trust import review_bindings, sign, verify_package
+from aepm.trust import (RELEASE, publish_release, publish_review, release_statement, review_bindings, sign, verify,
+                        verify_package)
 from aepm.verification import check_report, retained_manifests, review_package, verify_application
 from aepm.verification import execute_suite
 from tests.core.test_core import fixture
@@ -59,12 +60,9 @@ class ApplicationTests(unittest.TestCase):
             ref = pack(directory, cls.store)
             cls.refs.append(ref)
             component, _ = read_package(ref, cls.store)
-            statement = {"format": 1, "role": "release", "keyId": "local-release", **ref,
-                         "sourceTreeDigest": component["identity"]["sourceTreeDigest"]}
             statements = cls.store / "statements" / ref["digest"]
             statements.mkdir(parents=True)
-            write(statements / "release.json", statement)
-            (statements / "release.sig").write_bytes(sign(statement, "release", cls.identities / "release.pem"))
+            publish_release(cls.store, ref, cls.identities / "release.pem")
         policy = load(cls.policy)
         policy["trustedExecution"] = [ref["digest"] for ref in cls.refs]
         write(cls.policy, policy)
@@ -76,12 +74,8 @@ class ApplicationTests(unittest.TestCase):
             for field in ("lockDigest", "assemblyDigest", "packages", "suiteSetDigest"):
                 if report[field] != binding[field]:
                     raise AssertionError(field)
-            statement = {"format": 1, "role": "guardian", "keyId": "local-guardian", **ref, "dependencies": [],
-                         "previousReviewedDigest": None, "scope": ["platform", "required-local"], "verdict": "accepted",
-                         "reportDigest": digest(canonical(report))}
             statements = cls.store / "statements" / ref["digest"]
-            write(statements / "guardian.json", statement)
-            (statements / "guardian.sig").write_bytes(sign(statement, "guardian", cls.identities / "guardian.pem"))
+            publish_review(cls.store, ref, report, cls.identities / "guardian.pem")
             verify_package(ref, cls.store, cls.policy)
         cls.definition = {"format": 1, "id": "sample-app", "title": "Sample", "recipe": {"name": "ourapps-ae/recipe", "version": "0.1.0"},
                           "components": [{"id": "sample", "name": "ourapps-ae/sample", "version": "0.1.0", "configuration": {}}],
@@ -120,22 +114,15 @@ class ApplicationTests(unittest.TestCase):
         write(directory / "component.json", manifest)
         ref = pack(directory, self.store)
         component, _ = read_package(ref, self.store)
-        statement = {"format": 1, "role": "release", "keyId": "local-release", **ref,
-                     "sourceTreeDigest": component["identity"]["sourceTreeDigest"]}
         statements = self.store / "statements" / ref["digest"]
         statements.mkdir(parents=True)
-        write(statements / "release.json", statement)
-        (statements / "release.sig").write_bytes(sign(statement, "release", self.identities / "release.pem"))
+        publish_release(self.store, ref, self.identities / "release.pem")
         policy = load(type(self).policy)
         policy["trustedExecution"].append(ref["digest"])
         self.policy = self.root / "policy.json"
         write(self.policy, policy)
         report = review_package(ref, self.store, self.policy, True)
-        statement = {"format": 1, "role": "guardian", "keyId": "local-guardian", **ref, "dependencies": [],
-                     "previousReviewedDigest": None, "scope": ["platform", "required-local"], "verdict": "accepted",
-                     "reportDigest": digest(canonical(report))}
-        write(statements / "guardian.json", statement)
-        (statements / "guardian.sig").write_bytes(sign(statement, "guardian", self.identities / "guardian.pem"))
+        publish_review(self.store, ref, report, self.identities / "guardian.pem")
         self.definition["recipe"]["version"] = "0.1.1"
         return ref
 
@@ -566,8 +553,13 @@ class ApplicationTests(unittest.TestCase):
         self.command("inspect", archive["digest"], "--store", self.store)
         lock = self.root / "lock.json"
         self.command("resolve", definition, "--catalogue", self.store / "catalogue.json", "--out", lock)
-        statement = self.store / "statements" / archive["digest"] / "release.json"
-        self.command("sign", statement, "--role", "release", "--key", self.identities / "release.pem", "--out", self.root / "release.sig")
+        statement = self.root / "release-statement.json"
+        component, _ = read_package(archive, self.store)
+        write(statement, release_statement(archive, component))
+        envelope = self.root / "release.dsse.json"
+        self.command("sign", statement, "--role", "release", "--key", self.identities / "release.pem", "--out", envelope)
+        self.assertEqual(verify(envelope.read_bytes(), "release", self.policy, RELEASE)[0], load(statement))
+        self.command("bom", archive["digest"], "--store", self.store, "--out", self.root / "sample-0.1.0.cdx.json")
         self.command("review", archive["digest"], "--store", self.store, "--policy", self.policy, "--trusted")
         app = self.root / "installed"
         self.command("install", definition, "--lock", lock, "--store", self.store, "--policy", self.policy, "--target", app)

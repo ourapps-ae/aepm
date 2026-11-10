@@ -1,3 +1,4 @@
+import base64
 import copy
 import io
 import json
@@ -10,7 +11,8 @@ import unittest
 
 from aepm.bundle import extract, extract_review, pack, read_package, resolve
 from aepm.model import AepmError, canonical, digest, loads, validate_component, validate_lock
-from aepm.trust import review_bindings, sign, verify, verify_package
+from aepm.trust import (RELEASE, REVIEW, release_statement, review_bindings, review_statement, sign, verify,
+                        verify_package)
 
 
 def fixture(root, name="sample", version="0.1.0", dependencies=None):
@@ -69,7 +71,7 @@ class CoreTests(unittest.TestCase):
         self.source, self.store = self.root / "source", self.root / "store"
         self.component = fixture(self.source)
         self.policy = self.root / "policy.json"
-        policy = {"format": 1, "keys": {role: [{"id": role + "-test", "publicKey": key["publicKey"]}]
+        policy = {"format": 1, "keys": {role: [{"publicKey": key["publicKey"]}]
                                        for role, key in self.keys.items()}, "trustedExecution": []}
         self.policy.write_bytes(canonical(policy))
         for role, key in self.keys.items():
@@ -80,17 +82,14 @@ class CoreTests(unittest.TestCase):
 
     def release(self, ref):
         c, _ = read_package(ref, self.store)
-        statement = {"format": 1, "role": "release", "keyId": "release-test", **ref,
-                     "sourceTreeDigest": c["identity"]["sourceTreeDigest"]}
-        self.statement(ref, statement)
+        statement = release_statement(ref, c)
+        self.statement(ref, statement, "release")
         return statement
 
-    def statement(self, ref, statement):
+    def statement(self, ref, statement, role):
         directory = self.store / "statements" / ref["digest"]
         directory.mkdir(parents=True, exist_ok=True)
-        role = statement["role"]
-        (directory / (role + ".json")).write_bytes(canonical(statement))
-        (directory / (role + ".sig")).write_bytes(sign(statement, role, self.root / (role + ".pem")))
+        (directory / (role + ".dsse.json")).write_bytes(canonical(sign(statement, role, self.root / (role + ".pem"))))
 
     def report(self, ref):
         binding = review_bindings(ref, self.store)
@@ -110,11 +109,10 @@ class CoreTests(unittest.TestCase):
         directory = self.store / "reports"
         directory.mkdir(exist_ok=True)
         (directory / (digest(data) + ".json")).write_bytes(data)
-        statement = {"format": 1, "role": "guardian", "keyId": "guardian-test", **ref,
-                     "dependencies": sorted(p["digest"] for p in report["packages"] if p["digest"] != ref["digest"]),
-                     "previousReviewedDigest": None, "scope": ["platform", "required-local"],
-                     "verdict": "accepted", "reportDigest": digest(data)}
-        self.statement(ref, statement)
+        c, _ = read_package(ref, self.store)
+        statement = review_statement(ref, c["kind"], digest(data), sorted({s["scope"] for s in report["suites"]}),
+                                     len([p for p in report["packages"] if p["digest"] != ref["digest"]]))
+        self.statement(ref, statement, "guardian")
         return statement
 
     def rejected_before_write(self, ref, code=None, review=True):
@@ -379,12 +377,16 @@ class CoreTests(unittest.TestCase):
         for p in refs:
             self.release(p)
         statement = self.guardian(ref)
-        self.assertEqual(statement["dependencies"], sorted([leaf_ref["digest"], middle_ref["digest"]]))
-        self.assertEqual(statement["scope"], sorted({suite["scope"] for suite in declarations}))
+        self.assertEqual(statement["predicate"]["dependencyLevels"], {"AEPM_RELEASED": 2})
+        self.assertEqual(statement["predicate"]["verifiedLevels"], ["AEPM_PLATFORM", "AEPM_REQUIRED_LOCAL"])
         verify_package(ref, self.store, self.policy)
-        statement["dependencies"] = [middle_ref["digest"]]
-        self.statement(ref, statement)
+        statement["predicate"]["dependencyLevels"] = {"AEPM_RELEASED": 1}
+        self.statement(ref, statement, "guardian")
         self.rejected_before_write(ref, "guardian-dependencies", review=False)
+        statement["predicate"]["dependencyLevels"] = {"AEPM_RELEASED": 2}
+        statement["predicate"]["verifiedLevels"] = ["AEPM_REQUIRED_LOCAL"]
+        self.statement(ref, statement, "guardian")
+        self.rejected_before_write(ref, "guardian-scope", review=False)
 
     def test_review_bindings_reject_dependency_cycles(self):
         other = self.root / "other"
@@ -409,21 +411,64 @@ class CoreTests(unittest.TestCase):
         with self.assertRaisesRegex(AepmError, "missing-required-path"):
             validate_component(self.component)
 
+    def node_sign(self, payload, role="release", payload_type="application/vnd.in-toto+json"):
+        """An independently produced DSSE signature over PAE(payload_type, payload)."""
+        message = b"DSSEv1 %d %s %d %s" % (len(payload_type), payload_type.encode(), len(payload), payload)
+        request = {"key": self.keys[role]["privateKey"], "message": message.hex()}
+        return subprocess.check_output([
+            "node", "--input-type=module", "-e",
+            "import {sign} from 'node:crypto'; let s=''; for await(const c of process.stdin)s+=c;"
+            "const r=JSON.parse(s); process.stdout.write(sign(null,Buffer.from(r.message,'hex'),r.key).toString('base64'));"
+        ], input=canonical(request)).decode()
+
+    def test_dsse_envelope_and_in_toto_statement(self):
+        ref = pack(self.source, self.store)
+        statement = self.release(ref)
+        envelope = sign(statement, "release", self.root / "release.pem")
+        self.assertEqual(envelope["payloadType"], "application/vnd.in-toto+json")
+        self.assertEqual(base64.b64decode(envelope["payload"]), canonical(statement))
+        der = base64.b64decode("".join(self.keys["release"]["publicKey"].strip().splitlines()[1:-1]))
+        self.assertEqual(der[:12], bytes.fromhex("302a300506032b6570032100"))
+        public = der[12:]
+        self.assertEqual(envelope["signatures"][0]["keyid"], digest(public))
+        self.assertEqual(envelope["signatures"][0]["sig"], self.node_sign(canonical(statement)))
+        self.assertEqual(statement["_type"], "https://in-toto.io/Statement/v1")
+        self.assertEqual(statement["predicateType"], RELEASE)
+        self.assertEqual(statement["predicate"], {"purl": "pkg:github/ourapps-ae/sample@v0.1.0", "releaseId": "ourapps-ae/sample"})
+        self.assertEqual(statement["subject"][0]["digest"], {"sha256": ref["digest"]})
+        self.assertEqual(verify(canonical(envelope), "release", self.policy, RELEASE), (statement, digest(public)))
+        urlsafe = {**envelope, "payload": base64.urlsafe_b64encode(canonical(statement)).decode().rstrip("=")}
+        self.assertEqual(verify(canonical(urlsafe), "release", self.policy, RELEASE)[0], statement)
+
     def test_signed_noncanonical_statement_and_unknown_fields(self):
         ref = pack(self.source, self.store)
         statement = self.release(ref)
         encoded = json.dumps(statement, indent=2).encode()
-        request = {"key": self.keys["release"]["privateKey"], "message": (b"aepm/release/1\n" + encoded).hex()}
-        signature = subprocess.check_output([
-            "node", "--input-type=module", "-e",
-            "import {sign} from 'node:crypto'; let s=''; for await(const c of process.stdin)s+=c;"
-            "const r=JSON.parse(s); process.stdout.write(sign(null,Buffer.from(r.message,'hex'),r.key));"
-        ], input=canonical(request))
+        envelope = {"payload": base64.b64encode(encoded).decode(), "payloadType": "application/vnd.in-toto+json",
+                    "signatures": [{"keyid": sign(statement, "release", self.root / "release.pem")["signatures"][0]["keyid"],
+                                    "sig": self.node_sign(encoded)}]}
         with self.assertRaisesRegex(AepmError, "noncanonical-statement"):
-            verify(encoded, signature, "release", self.policy)
-        statement["publicKey"] = self.keys["release"]["publicKey"]
-        with self.assertRaisesRegex(AepmError, "invalid-fields"):
-            sign(statement, "release", self.root / "release.pem")
+            verify(canonical(envelope), "release", self.policy, RELEASE)
+        with self.assertRaisesRegex(AepmError, "noncanonical-envelope"):
+            verify(json.dumps(sign(statement, "release", self.root / "release.pem"), indent=1).encode(), "release", self.policy, RELEASE)
+        for change in (lambda s: s.update(publicKey="x"), lambda s: s["predicate"].update(extra=1),
+                       lambda s: s["subject"][0].update(uri="x"), lambda s: s["subject"].append(dict(s["subject"][0])),
+                       lambda s: s.update(_type="https://in-toto.io/Statement/v0.1")):
+            altered = json.loads(canonical(statement))
+            change(altered)
+            with self.subTest(statement=altered), self.assertRaises(AepmError):
+                sign(altered, "release", self.root / "release.pem")
+        envelope = sign(statement, "release", self.root / "release.pem")
+        for change in (lambda e: e.update(payloadType="application/json"), lambda e: e.update(extra=1),
+                       lambda e: e.update(signatures=[]), lambda e: e["signatures"][0].update(sig="AAAA")):
+            altered = json.loads(canonical(envelope))
+            change(altered)
+            with self.subTest(envelope=altered), self.assertRaises(AepmError):
+                verify(canonical(altered), "release", self.policy, RELEASE)
+        signed_type = {**envelope, "payloadType": "application/json"}
+        signed_type["signatures"] = [{**envelope["signatures"][0], "sig": self.node_sign(canonical(statement), payload_type="application/json")}]
+        with self.assertRaisesRegex(AepmError, "payload-type"):
+            verify(canonical(signed_type), "release", self.policy, RELEASE)
 
     def test_transitive_resolution_and_conflict(self):
         leaf = self.root / "leaf"
@@ -508,26 +553,40 @@ class CoreTests(unittest.TestCase):
     def test_role_swapping_and_external_pins(self):
         ref = pack(self.source, self.store)
         statement = self.release(ref)
-        signature = sign(statement, "release", self.root / "guardian.pem")
+        envelope = canonical(sign(statement, "release", self.root / "guardian.pem"))
         with self.assertRaisesRegex(AepmError, "invalid-signature"):
-            verify(canonical(statement), signature, "release", self.policy)
-        signature = sign(statement, "release", self.root / "release.pem")
+            verify(envelope, "release", self.policy, RELEASE)
+        envelope = canonical(sign(statement, "release", self.root / "release.pem"))
         with self.assertRaisesRegex(AepmError, "invalid-signature"):
-            verify(canonical(statement), signature, "guardian", self.policy)
-        self.assertEqual(verify(canonical(statement), signature, "release", self.policy), statement)
+            verify(envelope, "guardian", self.policy, REVIEW)
+        with self.assertRaisesRegex(AepmError, "statement-role"):
+            verify(envelope, "release", self.policy, REVIEW)
+        with self.assertRaisesRegex(AepmError, "statement-role"):
+            sign(statement, "guardian", self.root / "guardian.pem")
+        self.assertEqual(verify(envelope, "release", self.policy, RELEASE)[0], statement)
+        wrong_keyid = json.loads(envelope)
+        wrong_keyid["signatures"][0]["keyid"] = "a" * 64
+        with self.assertRaisesRegex(AepmError, "key-id-mismatch"):
+            verify(canonical(wrong_keyid), "release", self.policy, RELEASE)
         policy = loads(self.policy.read_bytes())
         policy["keys"]["guardian"][0]["publicKey"] = policy["keys"]["release"][0]["publicKey"]
         self.policy.write_bytes(canonical(policy))
         with self.assertRaisesRegex(AepmError, "duplicate-value"):
-            verify(canonical(statement), signature, "release", self.policy)
+            verify(envelope, "release", self.policy, RELEASE)
 
     def test_statement_identity_version_rebinding(self):
         ref = pack(self.source, self.store)
         statement = self.release(ref)
-        for key, value in (("name", "ourapps-ae/other"), ("version", "0.1.1"), ("sourceTreeDigest", "a" * 64)):
-            altered = {**statement, key: value}
-            self.statement(ref, altered)
-            self.rejected_before_write(ref, "statement-binding")
+        for change in (lambda s: s["subject"][0].update(name="other-0.1.0.tar"),
+                       lambda s: s["subject"][0]["digest"].update(sha256="a" * 64),
+                       lambda s: s["predicate"].update(purl="pkg:github/ourapps-ae/sample@v0.1.1"),
+                       lambda s: s["predicate"].update(releaseId="ourapps-ae/other"),
+                       lambda s: s["subject"][0]["annotations"].update(sourceTreeDigest="a" * 64)):
+            altered = json.loads(canonical(statement))
+            change(altered)
+            self.statement(ref, altered, "release")
+            with self.subTest(statement=altered):
+                self.rejected_before_write(ref, "statement-binding")
 
     def test_report_bytes_and_suite_coverage(self):
         ref = pack(self.source, self.store)
@@ -555,7 +614,7 @@ class CoreTests(unittest.TestCase):
             with self.subTest(mutation=mutation):
                 self.rejected_before_write(ref, review=False)
         statement = self.guardian(ref)
-        path = self.store / "reports" / (statement["reportDigest"] + ".json")
+        path = self.store / "reports" / (statement["predicate"]["inputAttestations"][0]["digest"]["sha256"] + ".json")
         path.write_bytes(path.read_bytes() + b" ")
         self.rejected_before_write(ref, "report-digest", review=False)
 
@@ -573,8 +632,8 @@ class CoreTests(unittest.TestCase):
         self.guardian(ref, report)
         verify_package(ref, self.store, self.policy)
         statement = self.guardian(ref, report)
-        statement["dependencies"] = []
-        self.statement(ref, statement)
+        statement["predicate"]["dependencyLevels"] = {"AEPM_RELEASED": 0}
+        self.statement(ref, statement, "guardian")
         self.rejected_before_write(ref, "guardian-dependencies", review=False)
 
     def test_recipe_review_excludes_application_suites(self):

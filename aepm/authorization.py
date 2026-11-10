@@ -150,7 +150,7 @@ def execution_request(*, app=None, ref=None, store=None, context, policy, execut
             entries.append(reference)
             shutil.copyfile(store / "objects" / (reference["digest"] + ".tar"), target_store / "objects" / (reference["digest"] + ".tar"))
             destination = private_directory(target_store / "statements" / reference["digest"])
-            for name in ("release.json", "release.sig"):
+            for name in ("release.dsse.json",):
                 shutil.copyfile(store / "statements" / reference["digest"] / name, destination / name)
         write(target_store / "catalogue.json", {"format": 1, "entries": entries})
         write(evidence / "target.json", {"context": "review", "ref": ref})
@@ -199,19 +199,17 @@ def authorize_execution(request, private_key, policy, out):
         fail("authorization-binding", "execution-state")
     if out.exists() or out.is_symlink():
         fail("authorization-exists", "out")
-    for key in load_policy(policy)["keys"]["owner"]:
-        statement = {"format": 2, "role": "owner", "keyId": key["id"], "purpose": "verification-authorization", **request}
-        signature = sign(statement, "owner", Path(private_key))
-        try:
-            verify(canonical(statement), signature, "owner", policy)
-        except AepmError:
-            continue
-        private_directory(out)
-        immutable(out / "authorization.json", statement)
-        descriptor = os.open(out / "authorization.sig", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(signature)
-            stream.flush()
-            os.fsync(stream.fileno())
-        return {"statement": str(out / "authorization.json"), "signature": str(out / "authorization.sig")}
-    fail("owner-key", "policy")
+    from .trust import EXECUTION_AUTHORIZATION, authorization_statement
+    envelope = sign(authorization_statement(request), "owner", Path(private_key))
+    try:
+        verify(canonical(envelope), "owner", policy, EXECUTION_AUTHORIZATION)
+    except AepmError:
+        fail("owner-key", "policy")
+    if not out.parent.is_dir():
+        fail("missing-path", "out")
+    descriptor = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    with os.fdopen(descriptor, "wb") as stream:
+        stream.write(canonical(envelope))
+        stream.flush()
+        os.fsync(stream.fileno())
+    return {"authorization": str(out)}

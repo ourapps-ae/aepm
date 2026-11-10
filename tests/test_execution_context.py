@@ -16,7 +16,7 @@ from aepm.environment import clock, claim_key
 from aepm.io import load, write
 from aepm.model import AepmError, canonical, digest
 from aepm.test_identities import generate
-from aepm.trust import sign, review_bindings, validate_report_evidence
+from aepm.trust import EXECUTION_AUTHORIZATION, authorization_view, publish_release, review_bindings, sign, validate_report_evidence, verify
 from aepm.verification import review_package
 from tests.core.test_core import fixture
 
@@ -62,12 +62,9 @@ class ExecutionContextTests(unittest.TestCase):
         write(self.source / "component.json", manifest)
         self.ref = pack(self.source, self.store)
         manifest, _ = read_package(self.ref, self.store)
-        statement = {"format": 1, "role": "release", "keyId": "local-release", **self.ref,
-                     "sourceTreeDigest": manifest["identity"]["sourceTreeDigest"]}
         statements = self.store / "statements" / self.ref["digest"]
         statements.mkdir(parents=True)
-        write(statements / "release.json", statement)
-        (statements / "release.sig").write_bytes(sign(statement, "release", self.root / "keys/release.pem"))
+        publish_release(self.store, self.ref, self.root / "keys/release.pem")
         policy = load(self.policy)
         policy["trustedExecution"] = [self.ref["digest"]]
         write(self.policy, policy)
@@ -77,12 +74,17 @@ class ExecutionContextTests(unittest.TestCase):
                              "secrets": {"livekitKey": {"secretRef": "synthetic", "version": "1"}}})
         self.secret_file = self.root / "secrets.json"
         write(self.secret_file, {"format": 1, "values": {"synthetic": {"version": "1", "value": "NEVER_RETAIN_SYNTHETIC_SECRET"}}})
-        self.request, self.authorization, self.state = self.root / "request.json", self.root / "authorization", self.root / "state"
+        self.request, self.authorization, self.state = self.root / "request.json", self.root / "authorization.dsse.json", self.root / "state"
 
     def authorize(self):
         execution_request(ref=self.ref, store=self.store, context=self.context, policy=self.policy, execution_state=self.state,
                           expires_at=clock() + 600, out=self.request)
         authorize_execution(self.request, self.root / "keys/owner.pem", self.policy, self.authorization)
+
+    def granted(self):
+        """The grant the owner signed, with its signing keyid and authorized assembly."""
+        statement, signer = verify(self.authorization.read_bytes(), "owner", self.policy, EXECUTION_AUTHORIZATION)
+        return authorization_view(statement, signer)
 
     def run_review(self):
         return review_package(self.ref, self.store, self.policy, True, execution_context=self.context,
@@ -132,7 +134,7 @@ class ExecutionContextTests(unittest.TestCase):
 
     def test_expired_and_missing_secret_fail(self):
         self.authorize()
-        statement = load(self.authorization / "authorization.json")
+        statement = self.granted()
         with patch("aepm.environment.clock", return_value=statement["expiresAt"]), self.assertRaises(AepmError):
             self.run_review()
         write(self.secret_file, {"format": 1, "values": {}})
@@ -212,10 +214,9 @@ class ExecutionContextTests(unittest.TestCase):
 
     def test_authorized_extra_operation_rejects_before_claim(self):
         self.authorize()
-        statement = load(self.authorization / "authorization.json")
-        statement["suites"][0]["operations"] = ["update-get"]
-        write(self.authorization / "authorization.json", statement)
-        (self.authorization / "authorization.sig").write_bytes(sign(statement, "owner", self.root / "keys/owner.pem"))
+        statement, _ = verify(self.authorization.read_bytes(), "owner", self.policy, EXECUTION_AUTHORIZATION)
+        statement["predicate"]["suites"][0]["operations"] = ["update-get"]
+        write(self.authorization, sign(statement, "owner", self.root / "keys/owner.pem"))
         with self.assertRaisesRegex(AepmError, "authorization-denied"):
             self.run_review()
         self.assertFalse(list((self.state / "claims").iterdir()))
@@ -223,7 +224,7 @@ class ExecutionContextTests(unittest.TestCase):
     def test_expiry_after_real_execution_prevents_completion(self):
         from aepm import contextual
         self.authorize()
-        statement = load(self.authorization / "authorization.json")
+        statement = self.granted()
         actual_run, state = contextual.run, {"now": clock()}
 
         def expire(argv, *args, **kwargs):
@@ -241,7 +242,7 @@ class ExecutionContextTests(unittest.TestCase):
     def test_completion_tampering_rejected_by_shared_adoption(self):
         self.authorize()
         report = self.run_review()
-        statement = load(self.authorization / "authorization.json")
+        statement = self.granted()
         path = self.state / "completions" / (claim_key(statement) + ".json")
         value = load(path)
         value["reportDigest"] = "f" * 64

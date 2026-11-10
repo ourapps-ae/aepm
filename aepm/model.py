@@ -914,11 +914,9 @@ def validate_execution(value: object, suite: dict) -> dict:
 @guarded
 def validate_execution_authorization(value: object) -> dict:
     execution_document(value, "authorization")
-    a = fields(value, "format role keyId purpose runId contextDigest policyDigest executionState context lockDigest assemblyDigest suiteSetDigest suites issuedAt expiresAt", "authorization")
-    if type(a["format"]) is not int or a["format"] != 2 or a["role"] != "owner" or a["purpose"] != "verification-authorization":
-        fail("statement-role", "authorization")
-    bounded_text(a["keyId"], "authorization.keyId")
-    for key in ("runId", "contextDigest", "policyDigest", "lockDigest", "assemblyDigest", "suiteSetDigest"):
+    """The grant an owner's execution-authorization attestation carries, with its signing keyid and assembly."""
+    a = fields(value, "keyId runId contextDigest policyDigest executionState context lockDigest assemblyDigest suiteSetDigest suites issuedAt expiresAt", "authorization")
+    for key in ("keyId", "runId", "contextDigest", "policyDigest", "lockDigest", "assemblyDigest", "suiteSetDigest"):
         sha256(a[key], "authorization." + key)
     state = fields(a["executionState"], "path id pathPlatform", "authorization.executionState")
     validate_absolute_path(state["path"], state["pathPlatform"])

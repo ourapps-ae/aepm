@@ -11,8 +11,7 @@ from .model import AepmError, Assembly, Proposal, canonical, digest, guarded
 from .verification import check_report, retained_manifests, transaction_path, verify_application
 
 
-BINDINGS = ("application", "previousLockDigest", "nextLockDigest", "configurationDigest", "designDigest",
-            "assemblyDigest", "reportDigest", "snapshotDigest", "stageDigest")
+from .trust import UPDATE_BINDINGS as BINDINGS
 
 
 @contextmanager
@@ -109,9 +108,10 @@ def propose(root: Path, definition, store: Path, policy: Path, trusted: bool, *,
         old_generated_metadata = {".aepm/lock.json", ".aepm/assembly.json", ".aepm/definition.json"}
         for ref in previous["lock"]["packages"]:
             old_generated_metadata.add(".aepm/archives/" + ref["digest"] + ".tar")
-            receipt = root / ".aepm/receipts" / ref["digest"] / "guardian.json"
+            receipt = root / ".aepm/receipts" / ref["digest"] / "guardian.dsse.json"
             if receipt.exists():
-                report_digest = load(receipt)["reportDigest"]
+                from .trust import review_report_digest
+                report_digest = review_report_digest(receipt, Path(policy))
                 old_generated_metadata.add(".aepm/evidence/reports/" + report_digest + ".json")
                 retained_report = load(root / ".aepm/evidence/reports" / (report_digest + ".json"))
                 if retained_report["format"] == 2:
@@ -119,8 +119,6 @@ def propose(root: Path, definition, store: Path, policy: Path, trusted: bool, *,
                         value = retained_report["execution"][key]
                         if value is not None:
                             old_generated_metadata.add(".aepm/evidence/" + name + "/" + value + ".json")
-                            if name == "authorizations":
-                                old_generated_metadata.add(".aepm/evidence/" + name + "/" + value + ".sig")
             prefix = ".aepm/packages/" + ref["digest"]
             old_generated_metadata.update(item["path"] for item in before if item["path"] == prefix or item["path"].startswith(prefix + "/"))
             prefix = ".aepm/receipts/" + ref["digest"]
@@ -201,25 +199,19 @@ def validate_proposal(root, directory, proposal, policy):
 
 @guarded
 def approve(proposal: Path, private_key: Path, policy: Path) -> Path:
-    from .trust import sign, verify
+    from .trust import UPDATE_APPROVAL, approval_statement, sign, verify
 
     root, directory, value = proposal_context(proposal)
     with transaction(root):
         validate_proposal(root, directory, value, policy)
-        for key in load(policy)["keys"]["owner"]:
-            statement = {"format": 1, "role": "owner", "keyId": key["id"],
-                         **{field: value[field] for field in BINDINGS}, "proposalDigest": digest(canonical(value))}
-            signature = sign(statement, "owner", Path(private_key))
-            try:
-                verify(canonical(statement), signature, "owner", Path(policy))
-            except AepmError:
-                continue
-            output = directory / "approval"
-            output.mkdir(exist_ok=True)
-            write(output / "owner.json", statement)
-            (output / "owner.sig").write_bytes(signature)
-            return output
-        fail("owner-key", "policy")
+        envelope = sign(approval_statement(digest(canonical(value)), value), "owner", Path(private_key))
+        try:
+            verify(canonical(envelope), "owner", Path(policy), UPDATE_APPROVAL)
+        except AepmError:
+            fail("owner-key", "policy")
+        output = directory / "approval.dsse.json"
+        write(output, envelope)
+        return output
 
 
 def journal(directory, value, phase):
@@ -236,7 +228,7 @@ def rename(source, destination):
 
 @guarded
 def apply(root: Path, proposal: Path, approval: Path, policy: Path) -> Assembly:
-    from .trust import verify
+    from .trust import UPDATE_APPROVAL, verify
 
     root = Path(root).absolute()
     expected_root, directory, value = proposal_context(proposal)
@@ -246,11 +238,12 @@ def apply(root: Path, proposal: Path, approval: Path, policy: Path) -> Assembly:
         if (directory / "journal.json").exists() or (directory / "backup").exists():
             fail("pending-recovery-or-cleanup", "transaction")
         assembly, previous = validate_proposal(root, directory, value, policy)
+        from .bundle import ordinary_path
         approval = Path(approval)
-        statement = verify((approval / "owner.json").read_bytes(), (approval / "owner.sig").read_bytes(), "owner", Path(policy))
-        if statement.get("format") != 1 or "purpose" in statement:
-            fail("owner-binding", "approval")
-        if any(statement.get(key) != value[key] for key in BINDINGS) or statement.get("proposalDigest") != digest(canonical(value)):
+        ordinary_path(approval)
+        statement, _ = verify(approval.read_bytes(), "owner", Path(policy), UPDATE_APPROVAL)
+        if (any(statement["predicate"][key] != value[key] for key in BINDINGS)
+                or statement["subject"][0]["digest"]["sha256"] != digest(canonical(value))):
             fail("owner-binding", "approval")
         state = {"format": 1, "root": str(root), "snapshotDigest": value["snapshotDigest"], "stageDigest": value["stageDigest"],
                  "proposalDigest": digest(canonical(value)), "oldAssembly": previous, "newAssembly": assembly}

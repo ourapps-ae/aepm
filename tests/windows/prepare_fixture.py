@@ -10,7 +10,7 @@ from aepm.bundle import pack, read_package, resolve
 from aepm.io import load, private_directory, write
 from aepm.model import canonical, digest
 from aepm.test_identities import generate
-from aepm.trust import sign, verify_package
+from aepm.trust import publish_release, publish_review, sign, verify_package
 from aepm.verification import review_package, verify_application
 from tests.test_application import source
 
@@ -59,19 +59,13 @@ def prepare(out):
         policy["trustedExecution"] = [ref["digest"]]
         write(out / "policy.json", policy)
         component, _ = read_package(ref, store)
-        statement = {"format": 1, "role": "release", "keyId": "local-release", **ref,
-                     "sourceTreeDigest": component["identity"]["sourceTreeDigest"]}
         statements = store / "statements" / ref["digest"]
         statements.mkdir(parents=True)
-        write(statements / "release.json", statement)
-        (statements / "release.sig").write_bytes(sign(statement, "release", root / "private-identities/release.pem"))
+        publish_release(store, ref, root / "private-identities/release.pem")
         report = review_package(ref, store, out / "policy.json", True)
         if report["summary"]["required-local"] != "passed":
             raise AssertionError(report)
-        guardian = {"format": 1, "role": "guardian", "keyId": "local-guardian", **ref, "dependencies": [], "previousReviewedDigest": None,
-                    "scope": ["required-local"], "verdict": "accepted", "reportDigest": digest(canonical(report))}
-        write(statements / "guardian.json", guardian)
-        (statements / "guardian.sig").write_bytes(sign(guardian, "guardian", root / "private-identities/guardian.pem"))
+        publish_review(store, ref, report, root / "private-identities/guardian.pem")
         verify_package(ref, store, out / "policy.json")
         definition = {"format": 1, "id": "windows-fixture", "title": "Windows Fixture",
                       "recipe": {"name": ref["name"], "version": ref["version"]}, "components": [], "configuration": {},

@@ -12,7 +12,7 @@ from aepm.environment import Execution, clock
 from aepm.io import load, private_directory, snapshot, write
 from aepm.model import AepmError, canonical, digest, package_ref, validate_component, validate_execution_context
 from aepm.test_identities import generate
-from aepm.trust import load_policy, review_bindings, sign, verify_release
+from aepm.trust import load_policy, publish_release, publish_review, review_bindings, sign, verify_release
 
 
 def inputs(source, context, out):
@@ -110,13 +110,10 @@ def check(source, context, out):
         policy = load_policy(policy_path)
         policy["trustedExecution"] = [ref["digest"]]
         write(policy_path, policy)
-        release = {"format": 1, "role": "release", "keyId": "local-release", **ref,
-                   "sourceTreeDigest": archived["identity"]["sourceTreeDigest"]}
         statements = private_directory(store / "statements" / ref["digest"])
-        write(statements / "release.json", release)
-        (statements / "release.sig").write_bytes(sign(release, "release", out / "private-identities/release.pem"))
+        publish_release(store, ref, out / "private-identities/release.pem")
         verify_release(ref, store, policy_path)
-        request, authority, registry = out / "request.json", out / "authorization", out / "execution-state"
+        request, authority, registry = out / "request.json", out / "authorization.dsse.json", out / "execution-state"
         execution_request(ref=ref, store=store, context=context, policy=policy_path, execution_state=registry,
                           expires_at=clock() + 1800, out=request,
                           selected_pairs=[{"package": ref["digest"], "id": "android-media"}])

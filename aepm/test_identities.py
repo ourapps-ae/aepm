@@ -24,7 +24,7 @@ process.stdout.write(pair.publicKey.export({type:'spki',format:'pem'}));
     for role in ("release", "guardian", "owner"):
         result = subprocess.run(["node", "-e", script, str(destination / (role + ".pem"))],
                                 check=True, capture_output=True, env={"PATH": os.environ.get("PATH", os.defpath)})
-        keys[role] = [{"id": "local-" + role, "publicKey": result.stdout.decode("ascii")}]
+        keys[role] = [{"publicKey": result.stdout.decode("ascii")}]
     policy = {"format": 1, "keys": keys, "trustedExecution": []}
     write(destination / "policy.json", policy)
     return destination / "policy.json"

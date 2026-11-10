@@ -16,7 +16,7 @@ from aepm.environment import clock, describe_resource
 from aepm.io import load, write
 from aepm.model import AepmError, canonical, digest
 from aepm.test_identities import generate
-from aepm.trust import sign, review_bindings, validate_report_evidence
+from aepm.trust import publish_release, publish_review, review_bindings, sign, validate_report_evidence
 from aepm.verification import review_package
 from tests.core.test_core import fixture
 
@@ -66,11 +66,9 @@ class SuiteSelectionTests(unittest.TestCase):
         self.store = self.root / "store"
         self.ref = pack(source, self.store)
         actual, _ = read_package(self.ref, self.store)
-        release = dict(format=1, role="release", keyId="local-release", **self.ref, sourceTreeDigest=actual["identity"]["sourceTreeDigest"])
         statements = self.store / "statements" / self.ref["digest"]
         statements.mkdir(parents=True)
-        write(statements / "release.json", release)
-        (statements / "release.sig").write_bytes(sign(release, "release", self.root / "keys/release.pem"))
+        publish_release(self.store, self.ref, self.root / "keys/release.pem")
         policy = load(self.policy)
         policy["trustedExecution"] = [self.ref["digest"]]
         write(self.policy, policy)
