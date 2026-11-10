@@ -19,6 +19,8 @@ python3 -m aepm apply APP PROPOSAL --approval APPROVAL --policy POLICY
 python3 -m aepm recover APP
 ```
 
+Every digest and signature covers RFC 8785 canonical JSON (`aepm.model.canonical`); integers outside plus or minus 2^53-1 are refused. `identity.licence` is an SPDX licence expression.
+
 Installation runs no package code. Release and guardian signatures must exist before installation. Review runs before guardian signing. A guardian signs the immutable review report digest, dependency digests and complete declared scope set. Reports preserve required-local, platform and deployed partitions.
 
 Verification requires explicit `--trusted` and every archive digest in the external policy's `trustedExecution`. `review`, `verify` and `propose-update` accept `--allow-network` for declared network preparation. Each suite receives a fresh writable copy, private home and cache paths and a credential-free environment. Package suites use their retained package root; application suites use the full generated tree. Installed tools must match their declared version or version prefix. Preparation logs are separate entries in each suite's content-addressed log index. This is trusted execution, not an operating-system sandbox: trusted code can access the host filesystem and network. Deployed checks remain blocked without authorization.

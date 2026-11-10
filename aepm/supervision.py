@@ -9,7 +9,7 @@ import threading
 import time
 
 from .bundle import ordinary_path
-from .model import AepmError, EXECUTION_REASONS, canonical, digest
+from .model import AepmError, EXECUTION_REASONS, SAFE_INTEGER, canonical, digest
 
 
 PHASES = frozenset("startup sample exit-observation limit group-cleanup private-scan private-refresh private-signal reap reader-join return".split())
@@ -81,7 +81,7 @@ MAX_ADOPTIONS = 8
 
 def adoption_entry(value):
     keys(value, ADOPTION_KEYS)
-    require(integer(value["uniqueIdentity"], high=18446744073709551615) and integer(value["generation"], high=4294967295))
+    require(integer(value["uniqueIdentity"], high=SAFE_INTEGER) and integer(value["generation"], high=4294967295))
     require(integer(value["windowIndex"], high=4095))
     relative = value["executableRelative"]
     require(isinstance(relative, str) and 0 < len(relative.encode()) <= 256 and not relative.startswith("/")
@@ -138,7 +138,7 @@ def validate_document(document, suite, event, number):
         if target is not None:
             keys(target, {"kind", "number", "uniqueIdentity", "generation"})
             require(target["kind"] in ("reserved-group", "owned-process") and integer(target["number"], 1, 2147483647))
-            require(target["uniqueIdentity"] is None or integer(target["uniqueIdentity"], high=18446744073709551615))
+            require(target["uniqueIdentity"] is None or integer(target["uniqueIdentity"], high=SAFE_INTEGER))
             require(target["generation"] is None or integer(target["generation"], high=4294967295))
             if target["kind"] == "reserved-group":
                 require(target["uniqueIdentity"] is None and target["generation"] is None)

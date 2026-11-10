@@ -16,7 +16,7 @@ from aepm.trust import review_bindings, sign, verify, verify_package
 def fixture(root, name="sample", version="0.1.0", dependencies=None):
     root.mkdir(parents=True)
     content = {"CONTRACT.md": b"# Contract\n", "interface.txt": b"interface\n",
-               "example.json": b'{"format":1}', "NOTICE": b"Licence deferred\n",
+               "example.json": b'{"format":1}', "NOTICE": b"Copyright Level N Ltd 2026\n",
                "visual.json": b"{}", "visual.svg": b"<svg/>", "visual.png": b"PNG",
                "description.txt": b"Connected example\n", "fixture.txt": b"fixture\n",
                "test.py": b"assert 2 + 2 == 4\n", "run.sh": b"#!/bin/sh\nexit 0\n"}
@@ -26,7 +26,7 @@ def fixture(root, name="sample", version="0.1.0", dependencies=None):
     c = {"format": 1, "kind": "component",
          "identity": {"name": "ourapps-ae/" + name, "version": version,
                       "sourceRevision": "test-revision", "sourceTreeDigest": "0" * 64,
-                      "licenceStatus": "deferred"},
+                      "licence": "Apache-2.0"},
          "facilities": [{"id": "sample", "description": "Sample fixture"}],
          "documents": {"contract": "CONTRACT.md", "interfaces": ["interface.txt"],
                        "examples": ["example.json"], "licenceNotice": "NOTICE"},
@@ -245,6 +245,26 @@ class CoreTests(unittest.TestCase):
                     continue
                 with self.subTest(key=key, value=value), self.assertRaises(AepmError):
                     validate_component(c)
+
+    def test_spdx_licence_expression(self):
+        for expression in ("Apache-2.0", "MIT OR Apache-2.0", "(MIT OR Apache-2.0) AND BSD-3-Clause",
+                           "GPL-2.0-or-later WITH Classpath-exception-2.0", "LicenseRef-Level-N",
+                           "DocumentRef-spdx-tool:LicenseRef-Custom", "GPL-2.0+", "Apache-2.0 WITH AdditionRef-Grant"):
+            c = copy.deepcopy(self.component)
+            c["identity"]["licence"] = expression
+            with self.subTest(expression=expression):
+                self.assertEqual(validate_component(c)["identity"]["licence"], expression)
+        for expression in ("", "deferred and", "MIT and Apache-2.0", "MIT OR", "(MIT", "MIT)", "MIT WITH", "AND",
+                           "LicenseRef-", "LicenseRef-a+", "a:b", " MIT", "MIT OR OR BSD", "(MIT) WITH X", "MIT,BSD", 1):
+            c = copy.deepcopy(self.component)
+            c["identity"]["licence"] = expression
+            with self.subTest(expression=expression), self.assertRaises(AepmError) as caught:
+                validate_component(c)
+            self.assertEqual(caught.exception.code, "invalid-licence")
+        c = copy.deepcopy(self.component)
+        c["identity"]["licenceStatus"] = "deferred"
+        with self.assertRaises(AepmError):
+            validate_component(c)
 
     def test_prerequisite_grammar(self):
         for prerequisites in ([], ["external:livekit-project"], ["external:windows-host"],

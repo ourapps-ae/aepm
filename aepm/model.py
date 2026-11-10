@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import decimal
 import hashlib
 from functools import wraps
 import json
@@ -133,27 +134,76 @@ def guarded(function):
     return wrapped
 
 
+SAFE_INTEGER = 2 ** 53 - 1
+
+
+def _number(value: float) -> str:
+    """ECMAScript Number::toString, as RFC 8785 section 3.2.2.3 requires."""
+    if not math.isfinite(value):
+        fail("invalid-json", "document")
+    if value == 0:
+        return "0"
+    if value < 0:
+        return "-" + _number(-value)
+    shortest = decimal.Decimal(repr(value)).as_tuple()
+    digits = "".join(map(str, shortest.digits)).lstrip("0")
+    exponent = cast(int, shortest.exponent) + len(digits) - len(digits.rstrip("0"))
+    digits = digits.rstrip("0")
+    k = len(digits)
+    n = k + exponent
+    if k <= n <= 21:
+        return digits + "0" * (n - k)
+    if 0 < n <= 21:
+        return digits[:n] + "." + digits[n:]
+    if -6 < n <= 0:
+        return "0." + "0" * -n + digits
+    sign = "+" if n - 1 >= 0 else "-"
+    return digits[0] + ("." + digits[1:] if k > 1 else "") + "e" + sign + str(abs(n - 1))
+
+
 @guarded
 def canonical(value: object) -> bytes:
-    def check(item: object) -> None:
-        if item is None or type(item) in (str, int, bool):
-            return
-        if type(item) is float and math.isfinite(item):
-            return
-        if type(item) is list:
-            for child in item:
-                check(child)
-            return
-        if type(item) is dict and all(type(key) is str for key in item):
-            for child in item.values():
-                check(child)
-            return
-        fail("invalid-json-type", "document")
-    check(value)
+    """RFC 8785 JSON Canonicalization Scheme; integers outside plus or minus 2^53-1 are refused."""
+    parts: list[str] = []
+
+    def emit(item: object) -> None:
+        if item is None:
+            parts.append("null")
+        elif item is True:
+            parts.append("true")
+        elif item is False:
+            parts.append("false")
+        elif type(item) is int:
+            if abs(item) > SAFE_INTEGER:
+                fail("invalid-number", "document")
+            parts.append(str(item))
+        elif type(item) is float:
+            parts.append(_number(item))
+        elif type(item) is str:
+            parts.append(json.dumps(item, ensure_ascii=False))
+        elif type(item) is list:
+            parts.append("[")
+            for index, child in enumerate(item):
+                if index:
+                    parts.append(",")
+                emit(child)
+            parts.append("]")
+        elif type(item) is dict and all(type(key) is str for key in item):
+            parts.append("{")
+            for index, key in enumerate(sorted(item, key=lambda name: name.encode("utf-16-be", "surrogatepass"))):
+                if index:
+                    parts.append(",")
+                parts.append(json.dumps(key, ensure_ascii=False))
+                parts.append(":")
+                emit(item[key])
+            parts.append("}")
+        else:
+            fail("invalid-json-type", "document")
+
+    emit(value)
     try:
-        return json.dumps(value, sort_keys=True, separators=(",", ":"),
-                          ensure_ascii=False, allow_nan=False).encode("utf-8")
-    except (ValueError, UnicodeError):
+        return "".join(parts).encode("utf-8")
+    except UnicodeError:
         fail("invalid-json", "document")
 
 
@@ -245,6 +295,77 @@ def name(value: object, path: str) -> str:
     return value
 
 
+SPDX_ID = r"[A-Za-z0-9.-]+"
+SPDX_TOKEN = re.compile(r"\s*(\(|\)|[A-Za-z0-9.:+-]+)")
+
+
+def licence(value: object, path: str) -> str:
+    """An SPDX licence expression (SPDX 2.3 Annex D syntax; identifiers are not checked against the list)."""
+    if type(value) is not str or not 0 < len(value) <= 512 or value != value.strip():
+        fail("invalid-licence", path)
+    tokens, position = [], 0
+    while position < len(value):
+        match = SPDX_TOKEN.match(value, position)
+        if not match:
+            fail("invalid-licence", path)
+        tokens.append(match.group(1))
+        position = match.end()
+    index = 0
+
+    def peek() -> str | None:
+        return tokens[index] if index < len(tokens) else None
+
+    def take() -> str:
+        nonlocal index
+        if index >= len(tokens):
+            fail("invalid-licence", path)
+        index += 1
+        return tokens[index - 1]
+
+    def identifier(token: str, prefix: str) -> bool:
+        if token.startswith("DocumentRef-"):
+            document, _, token = token.partition(":")
+            if not re.fullmatch("DocumentRef-" + SPDX_ID, document):
+                return False
+            return re.fullmatch(prefix + SPDX_ID, token) is not None
+        if token in ("AND", "OR", "WITH"):
+            return False
+        if token.startswith(prefix):
+            return re.fullmatch(prefix + SPDX_ID, token) is not None
+        return re.fullmatch(SPDX_ID + ("\\+?" if prefix == "LicenseRef-" else ""), token) is not None
+
+    def primary() -> None:
+        token = take()
+        if token == "(":
+            disjunction()
+            if take() != ")":
+                fail("invalid-licence", path)
+            return
+        if not identifier(token, "LicenseRef-"):
+            fail("invalid-licence", path)
+        if peek() == "WITH":
+            take()
+            if not identifier(take(), "AdditionRef-"):
+                fail("invalid-licence", path)
+
+    def conjunction() -> None:
+        primary()
+        while peek() == "AND":
+            take()
+            primary()
+
+    def disjunction() -> None:
+        conjunction()
+        while peek() == "OR":
+            take()
+            conjunction()
+
+    disjunction()
+    if index != len(tokens):
+        fail("invalid-licence", path)
+    return value
+
+
 def safe_path(value: object, path: str = "path", *, dot: bool = False) -> str:
     value = text(value, path)
     if dot and value == ".":
@@ -282,12 +403,12 @@ def validate_component(value: object) -> Component:
     if type(c["format"]) is not int or c["format"] not in (1, 2):
         fail("invalid-format", "component")
     choice(c["kind"], ("component", "recipe"), "kind")
-    identity = fields(c["identity"], "name version sourceRevision sourceTreeDigest licenceStatus", "identity")
+    identity = fields(c["identity"], "name version sourceRevision sourceTreeDigest licence", "identity")
     name(identity["name"], "identity.name")
     version(identity["version"], "identity.version")
     text(identity["sourceRevision"], "identity.sourceRevision")
     sha256(identity["sourceTreeDigest"], "identity.sourceTreeDigest")
-    choice(identity["licenceStatus"], ("deferred",), "identity.licenceStatus")
+    licence(identity["licence"], "identity.licence")
     for item in array(c["facilities"], "facilities", True):
         fields(item, "id description", "facilities")
         for val in item.values():

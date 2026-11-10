@@ -291,7 +291,7 @@ class AdoptionSlotTests(Guarded):
                  [{**good, "executableRelative": "Developer/../ibtoold"}], [{**good, "executableRelative": "./ibtoold"}],
                  [{**good, "executableRelative": "a" * 257}], [{**good, "executableRelative": ""}],
                  [{**good, "windowIndex": 4096}], [{**good, "windowIndex": -1}], [{**good, "windowIndex": True}],
-                 [{**good, "uniqueIdentity": 2 ** 64}], [{**good, "generation": 2 ** 32}], {"not": "a list"}]
+                 [{**good, "uniqueIdentity": 2 ** 53}], [{**good, "generation": 2 ** 32}], {"not": "a list"}]
         for index, adoptions in enumerate(cases):
             with self.subTest(index=index), self.assertRaises(AepmError):
                 self.check(self.document(adoptions))
