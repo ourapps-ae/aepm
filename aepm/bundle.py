@@ -205,6 +205,25 @@ def pack(source: Path, store: Path) -> PackageRef:
     return ref
 
 
+@guarded
+def add_archive(store: Path, ref: PackageRef, data: bytes) -> Component:
+    """Add verified archive bytes to a store exactly as pack does: objects/<digest>.tar and its catalogue entry."""
+    component, _ = read_archive(ref, data)
+    ordinary_path(store, missing=True)
+    store.mkdir(parents=True, exist_ok=True)
+    lock_path = store / ".catalogue-lock"
+    try:
+        descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError:
+        fail("store-busy", "catalogue")
+    try:
+        _publish_archive(ref, store, data)
+    finally:
+        os.close(descriptor)
+        lock_path.unlink()
+    return component
+
+
 def _publish_archive(ref: PackageRef, store: Path, data: bytes) -> None:
     catalogue = store / "catalogue.json"
     entries = catalogue_entries(catalogue) if catalogue.exists() else []
@@ -233,9 +252,17 @@ def read_package(ref: PackageRef, store: Path) -> tuple[Component, dict[str, byt
     ordinary_path(path)
     if path.stat().st_size > MAX_ARCHIVE:
         fail("archive-limit", str(path))
-    data = path.read_bytes()
+    return read_archive(ref, path.read_bytes(), str(path))
+
+
+@guarded
+def read_archive(ref: PackageRef, data: bytes, path: str = "archive") -> tuple[Component, dict[str, bytes]]:
+    """Validate archive bytes named by ref: digest, ustar membership, canonical manifest and identity."""
+    package_ref(ref)
+    if len(data) > MAX_ARCHIVE:
+        fail("archive-limit", path)
     if digest(data) != ref["digest"]:
-        fail("archive-digest", str(path))
+        fail("archive-digest", path)
     payloads, modes = {}, {}
     order = []
     total = 0

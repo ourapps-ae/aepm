@@ -8,6 +8,9 @@ Run `python3 -m aepm --help` from this directory. For other working directories,
 python3 -m aepm pack SOURCE --store STORE
 python3 -m aepm inspect DIGEST --store STORE
 python3 -m aepm bom DIGEST --store STORE --out NAME-VERSION.cdx.json
+python3 -m aepm fetch NAME@VERSION... --store STORE [--from https://ourapps.app] [--with-dependencies]
+python3 -m aepm questions RECIPE@VERSION --store STORE
+python3 -m aepm design RECIPE@VERSION --store STORE [--answers ANSWERS] --out DEFINITION
 python3 -m aepm resolve DEFINITION --catalogue STORE/catalogue.json --out LOCK
 python3 -m aepm sign STATEMENT --role release --key KEY --out ENVELOPE
 python3 -m aepm review DIGEST --store STORE --policy POLICY --trusted
@@ -21,6 +24,10 @@ python3 -m aepm recover APP
 ```
 
 Every digest and signature covers RFC 8785 canonical JSON (`aepm.model.canonical`); integers outside plus or minus 2^53-1 are refused. `identity.licence` is an SPDX licence expression.
+
+`fetch` reads each package's catalogue entry (`/api/components/<name>/<version>`, else `/api/recipes/...`), downloads the archive through its `/bundle` link, refuses it unless its SHA-256 equals the catalogue digest and the archive validates, and adds it to the store as `pack` does. From the release named by the entry's `source` it also downloads, when present, `<name>-<version>.release.dsse.json` and `.guardian.dsse.json` into `statements/<digest>/` and the canonical review report `<name>-<version>.review.json` into `reports/<digest>.json`. `--with-dependencies` follows declared dependencies and, for a recipe, every component its `recipe.json` names at the pinned version.
+
+`questions` prints a recipe's questions (id, ask, askAgent, type, options or min/max, default, askWhen). `design` applies the recipe evaluation rules 1 to 25 of the component standard (`aepm.recipe.evaluate`, CEL conditions included) to the recipe's `recipe.json` and the components' manifests and `suitability.json`, all read from the store archives, and writes the application definition. Unanswered questions take their defaults. When the answers do not give a design it prints `{"ok": false, "errors": [{code, path}]}` and exits 1, writing nothing. `aepm.recipe.World.from_directories(recipe, components)` evaluates source trees instead.
 
 Installation runs no package code. Release and guardian attestations must exist before installation. Review runs before guardian signing. Reports preserve required-local, platform and deployed partitions.
 

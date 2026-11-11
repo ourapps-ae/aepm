@@ -53,6 +53,19 @@ def parser():
         request.add_argument("--" + option, type=Path, required=True)
     request.add_argument("--expires-at", type=int, required=True)
     request.add_argument("--suite", action="append")
+    design = commands.add_parser("design")
+    design.add_argument("recipe")
+    design.add_argument("--store", type=Path, required=True)
+    design.add_argument("--answers", type=Path)
+    design.add_argument("--out", type=Path, required=True)
+    get = commands.add_parser("fetch")
+    get.add_argument("packages", nargs="+")
+    get.add_argument("--store", type=Path, required=True)
+    get.add_argument("--from", dest="origin", default="https://ourapps.app")
+    get.add_argument("--with-dependencies", action="store_true")
+    ask = commands.add_parser("questions")
+    ask.add_argument("recipe")
+    ask.add_argument("--store", type=Path, required=True)
     authorize = commands.add_parser("authorize-execution")
     authorize.add_argument("request", type=Path)
     for option in ("key", "policy", "out"):
@@ -68,8 +81,41 @@ def reference(archive_digest, store):
     return matches[0]
 
 
+def identity(value):
+    """NAME@VERSION, with NAME a package name or its short form."""
+    from .model import name, version
+    package, separator, number = value.rpartition("@")
+    if not separator:
+        fail("arguments", "package")
+    package = package if "/" in package else "ourapps-ae/" + package
+    return name(package, "package"), version(number, "package")
+
+
+class Refused(Exception):
+    def __init__(self, errors):
+        self.errors = errors
+
+
 def dispatch(args):
     command = args.command
+    if command == "fetch":
+        from .fetch import fetch
+        return fetch(args.store, [identity(item) for item in args.packages], with_dependencies=args.with_dependencies,
+                     origin=args.origin)
+    if command in ("design", "questions"):
+        from .recipe import World, evaluate, questions
+        world = World.from_store(*identity(args.recipe), args.store)
+        if command == "questions":
+            return questions(world.recipe)
+        answers = load(args.answers) if args.answers is not None else {}
+        if type(answers) is not dict:
+            fail("invalid-answers", "answers")
+        result = evaluate(world, answers)
+        if not result["ok"]:
+            raise Refused(result["errors"])
+        definition = validate_definition(result["design"])
+        write(args.out, definition)
+        return {"definition": str(args.out), "digest": digest(canonical(definition)), "components": len(definition["components"])}
     if os.name == "nt" and command in ("pack", "propose-update", "approve", "apply", "recover"):
         fail("unsupported-host", command)
     execution_options = {}
@@ -148,6 +194,8 @@ def main(argv=None):
         result = dispatch(args)
         print(canonical({"ok": True, "result": result}).decode("utf-8"))
         return int(args.command in ("verify", "review") and result["summary"]["required-local"] != "passed")
+    except Refused as refused:
+        print(canonical({"ok": False, "errors": refused.errors}).decode("utf-8"))
     except AepmError as error:
         print(canonical({"ok": False, "error": {"code": error.code, "path": error.path}}).decode("utf-8"))
     except (OSError, ValueError, KeyError, TypeError):
