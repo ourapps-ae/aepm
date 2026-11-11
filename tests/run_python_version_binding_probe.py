@@ -193,7 +193,7 @@ def main(expected_controller):
             try:
                 # Replay captured bytes through the production comparison without launching a tool.
                 with patch.object(contextual, "run", return_value=result), patch.object(contextual, "resolve_command", return_value=plan["argv"]):
-                    versions = contextual.tool_versions({"tools": {"python3": "3.12.8"}}, root / "work", plan["environment"])
+                    versions = contextual.tool_versions({"tools": {"python3": "3.12"}}, root / "work", plan["environment"])
                 record["comparison"] = {"matched": True, "versions": versions}
             except Exception as error:
                 record["comparison"] = {"matched": False, "class": type(error).__name__, "reason": getattr(error, "code", None)}

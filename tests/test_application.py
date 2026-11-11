@@ -450,13 +450,13 @@ class ApplicationTests(unittest.TestCase):
             shutil.rmtree(self.root / stale, ignore_errors=True)
 
         def mutate(manifest):
-            for index, (destination, component) in enumerate(entries):
+            for index, (destination, component, *condition) in enumerate(entries):
                 path = "extra%d.txt" % index
                 (self.root / "recipe" / path).write_text("extra %d\n" % index)
                 manifest["files"].append({"path": path, "executable": False})
                 artefact = {"source": path, "destination": destination, "template": False, "executable": False}
                 if component:
-                    artefact["component"] = component
+                    artefact[condition[0] if condition else "component"] = component
                 manifest["artefacts"].append(artefact)
 
         self.publish_recipe(mutate)
@@ -483,6 +483,23 @@ class ApplicationTests(unittest.TestCase):
         self.assertEqual([item["id"] for item in without["design"]["instances"]], ["application"])
         output = export_design(without, self.root / "diagrams")
         self.assertGreater(Path(output["png"]).stat().st_size, 100)
+
+    def test_stand_in_artefact_installs_only_without_its_component(self):
+        sample = "ourapps-ae/sample"
+        entries = [("video.ts", sample), ("video.ts", sample, "withoutComponent"), ("only-without.txt", sample, "withoutComponent")]
+        self.conditional_recipe(entries)
+        with_component = self.install()
+        self.assertIn("video.ts", self.owned(with_component))
+        self.assertNotIn("only-without.txt", self.owned(with_component))
+        self.assertEqual((self.root / "installed/video.ts").read_text(), "extra 0\n")
+        self.assertEqual(read_assembly(self.root / "installed"), with_component)
+        shutil.rmtree(self.root / "installed")
+        self.conditional_recipe(entries, components=False)
+        without = self.install()
+        self.assertEqual(self.owned(without), ["app.txt", "only-without.txt", "video.ts"])
+        self.assertEqual((self.root / "installed/video.ts").read_text(), "extra 1\n")
+        retained_manifests(self.root / "installed", self.policy)
+        export_design(without, self.root / "diagrams")
 
     def test_unconditional_and_other_component_artefacts_install(self):
         self.conditional_recipe([("plain.txt", None), ("missing.txt", "ourapps-ae/absent")])

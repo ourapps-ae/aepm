@@ -70,8 +70,10 @@ def present_components(definition):
 
 
 def installed_artefacts(manifest, present):
-    """Artefacts without a `component` condition, or whose component is in the design."""
-    return [item for item in manifest["artefacts"] if "component" not in item or item["component"] in present]
+    """Unconditional artefacts, those whose `component` is in the design and those whose `withoutComponent` is not."""
+    return [item for item in manifest["artefacts"]
+            if ("component" not in item or item["component"] in present)
+            and ("withoutComponent" not in item or item["withoutComponent"] not in present)]
 
 
 def configuration(declarations, supplied):

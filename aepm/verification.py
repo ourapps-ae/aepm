@@ -124,7 +124,8 @@ def execution_environment(home, tools, *, tool_selection=None):
                     return None
                 raise
         else:
-            executable = shutil.which(name)
+            from .host_tools import host_tool
+            executable = host_tool(name)
             if executable is None:
                 return None
         (bin_path / name).symlink_to(Path(executable).resolve())
@@ -179,8 +180,8 @@ def execute_suite(suite, source, allow_network, logs, *, tool_selection=None, ad
                     if tool_code != 0 or tool_reason:
                         reason = "tool-version-unavailable"
                         break
-                    versions = re.findall(r"(?<![0-9])([0-9]+(?:\.[0-9]+)*)", version_output.decode("utf-8", errors="replace"))
-                    if not any(value == expected_version or value.startswith(expected_version + ".") for value in versions):
+                    from .host_tools import version_matches
+                    if version_matches(version_output.decode("utf-8", errors="replace"), expected_version) is None:
                         reason = "tool-version-mismatch"
                         break
             for name in [*suite["fixtures"], *suite["locks"]]:

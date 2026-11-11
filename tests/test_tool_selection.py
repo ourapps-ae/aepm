@@ -174,19 +174,19 @@ class ContextualTests(Guarded):
 
     def test_finite_path_ignores_ambient_shadow_and_resolves_binding(self):
         selection = self.selection()
-        environment = self.environment({"python3": "3.12.8", "node": "26.5.0"}, selection=selection)
+        environment = self.environment({"python3": "3.12", "node": "26.5"}, selection=selection)
         aliases = self.root / "private/tools"
         self.assertEqual(environment["PATH"], os.pathsep.join([str(aliases), selection.path]))
         self.assertEqual(sorted(path.name for path in aliases.iterdir()), ["node", "python3"])
         self.assertEqual(os.readlink(aliases / "python3"), str(self.python))
         self.assertEqual(aliases.stat().st_mode & 0o7777, 0o500)
         for tail in (["--version"], ["scripts/platform-check.py", "android"]):
-            argv = contextual.resolve_command(["python3", *tail], self.root, {"python3": "3.12.8"}, environment,
+            argv = contextual.resolve_command(["python3", *tail], self.root, {"python3": "3.12"}, environment,
                                               tool_selection=selection)
             self.assertEqual(argv, [str(self.python), *tail])
         shadowed = {**environment, "PATH": os.pathsep.join([str(self.shadow), environment["PATH"]])}
         with self.assertRaises(AepmError) as caught:
-            contextual.resolve_command(["python3", "--version"], self.root, {"python3": "3.12.8"}, shadowed,
+            contextual.resolve_command(["python3", "--version"], self.root, {"python3": "3.12"}, shadowed,
                                        tool_selection=selection)
         self.assertEqual(caught.exception.code, "resource-changed")
 
@@ -196,7 +196,7 @@ class ContextualTests(Guarded):
         executable(developer / "usr/bin/python3", b"xcode python 3.9")
         apple = {"id": "appleDeveloperDirectory", "path": str(developer)}
         selection = self.selection()
-        environment = self.environment({"python3": "3.12.8", "xcodebuild": "27.2"}, [apple], selection)
+        environment = self.environment({"python3": "3.12", "xcodebuild": "27.2"}, [apple], selection)
         aliases = self.root / "private/tools"
         self.assertEqual(environment["PATH"].split(os.pathsep)[:3], [str(aliases), str(self.bin), str(developer / "usr/bin")])
         self.assertEqual(Path(shutil.which("python3", path=environment["PATH"]) or "").resolve(), self.python)
@@ -215,7 +215,7 @@ class ContextualTests(Guarded):
         executable(developer / "usr/bin/python3", b"xcode python 3.9")
         apple = {"id": "appleDeveloperDirectory", "path": str(developer)}
         selection = self.xcrun_selection()
-        tools = {"python3": "3.12.8", "xcodebuild": "27.2", "xcrun": "72"}
+        tools = {"python3": "3.12", "xcodebuild": "27.2", "xcrun": "72"}
         environment = self.environment(tools, [apple], selection)
         self.assertEqual(environment["DEVELOPER_DIR"], str(developer))
         names = contextual._resource_tools(tools, [apple])
@@ -259,11 +259,11 @@ class ContextualTests(Guarded):
         document["searchPath"].insert(1, str(global_java.parent))
         document["tools"]["java"] = binding(global_java)
         selection = self.selection(document, self.required | {"java"})
-        environment = self.environment({"java": "17", "python3": "3.12.8"}, [self.java], selection)
+        environment = self.environment({"java": "17", "python3": "3.12"}, [self.java], selection)
         self.assertEqual(environment["PATH"].split(os.pathsep)[:3],
                          [str(self.root / "private/tools"), str(self.bin), str(self.java_home / "bin")])
         self.assertEqual(os.readlink(self.root / "private/tools/java"), str(self.java_home / "bin/java"))
-        names = contextual._resource_tools({"java": "17", "python3": "3.12.8"}, [self.java])
+        names = contextual._resource_tools({"java": "17", "python3": "3.12"}, [self.java])
         self.assertEqual(names, {"java"})
         argv = contextual.resolve_command(["java", "-version"], self.root, {"java": "17"}, environment,
                                           tool_selection=selection, resource_names=names)
@@ -275,7 +275,7 @@ class ContextualTests(Guarded):
     def test_selection_on_windows_fails_explicitly(self):
         selection = self.selection()
         with patch.object(contextual.os, "name", "nt"), self.assertRaises(AepmError) as caught:
-            contextual.tool_environment(self.root / "private/home", {"python3": "3.12.8"}, [], tool_selection=selection)
+            contextual.tool_environment(self.root / "private/home", {"python3": "3.12"}, [], tool_selection=selection)
         self.assertEqual((caught.exception.code, caught.exception.path), ("tool-selection-invalid", "toolSelection"))
         self.assertFalse((self.root / "private").exists())
 
@@ -295,7 +295,7 @@ class ContextualTests(Guarded):
         cleanup = {"argv": ["python3", "hook"], "cwd": ".", "timeoutSeconds": 5} if hook else None
         suite = {"package": "a" * 64, "id": "aliases", "scope": "platform", "root": "package", "argv": ["python3", "main"],
                  "cwd": ".", "prepare": [{"argv": ["python3", "step0"], "cwd": ".", "network": False}],
-                 "tools": {"python3": "3.12.8", "node": "26.5.0"}, "fixtures": [], "locks": [], "network": False,
+                 "tools": {"python3": "3.12", "node": "26.5"}, "fixtures": [], "locks": [], "network": False,
                  "timeoutSeconds": 30, "requirements": [], "execution": {"kind": "local", "simulation": False,
                  "operations": [], "settings": [], "secrets": [], "resources": [], "assertions": [], "cleanup": cleanup}}
         execution = SimpleNamespace(check_time=lambda: None, run_id="fixture", authorization=None,
@@ -435,7 +435,7 @@ class ContextualTests(Guarded):
 
     def test_undeclared_system_programs_resolve(self):
         selection = self.selection()
-        environment = self.environment({"python3": "3.12.8"}, selection=selection)
+        environment = self.environment({"python3": "3.12"}, selection=selection)
         for name in ("sh", "uname", "env", "dirname"):
             self.assertIsNotNone(shutil.which(name, path=environment["PATH"]), name)
 
@@ -463,7 +463,7 @@ class OrdinarySuiteTests(Guarded):
     def test_links_target_binding_and_path_is_finite(self):
         selection = self.selection()
         home = self.root / "home-check"
-        environment = verification.execution_environment(home, {"python3": "3.12.8"}, tool_selection=selection)
+        environment = verification.execution_environment(home, {"python3": "3.12"}, tool_selection=selection)
         self.assertEqual(os.readlink(home / "bin/python3"), str(self.python))
         self.assertEqual(environment["PATH"], os.pathsep.join([str(home / "bin"), selection.path]))
         for name in ("sh", "uname", "env", "dirname"):
@@ -483,7 +483,7 @@ class OrdinarySuiteTests(Guarded):
                     calls.append(argv)
                     return 0, 0, "", output
 
-                result, _ = self.execute(self.selection(), {"python3": "3.12.8"}, run)
+                result, _ = self.execute(self.selection(), {"python3": "3.12"}, run)
                 self.assertEqual((result["status"], result["reason"]), (status, reason))
 
     def test_link_drift_before_launch_fails_closed(self):
@@ -496,7 +496,7 @@ class OrdinarySuiteTests(Guarded):
             return 0, 0, "", b"Python 3.12.8\n"
 
         with self.assertRaises(AepmError) as caught:
-            self.execute(selection, {"python3": "3.12.8"}, run)
+            self.execute(selection, {"python3": "3.12"}, run)
         self.assertEqual(caught.exception.code, "resource-changed")
 
 

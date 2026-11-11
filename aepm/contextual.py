@@ -177,9 +177,8 @@ def tool_environment(home, tools, selected, *, tool_selection=None):
         elif tool_selection is not None:
             executable = Path(tool_selection.canonical(name))
         else:
-            resolved = shutil.which(name)
-            if resolved:
-                executable = Path(resolved).resolve()
+            from .host_tools import host_tool
+            executable = host_tool(name)
         if executable is None or not executable.is_file():
             fail("tool-unavailable", name)
         if os.name == "nt" and getattr(executable.resolve().lstat(), "st_file_attributes", 0) & 0x400:
@@ -256,8 +255,8 @@ def tool_versions(suite, root, environment, bindings=None, *, budget=None, tool_
         check_probe_completion(reason, budget)
         if code != 0 or reason:
             fail("tool-unavailable", name)
-        matches = re.findall(r"(?<![0-9])([0-9]+(?:\.[0-9]+)*)", output.decode("utf-8", errors="replace"))
-        match = next((value for value in matches if value == expected or value.startswith(expected + ".")), None)
+        from .host_tools import version_matches
+        match = version_matches(output.decode("utf-8", errors="replace"), expected)
         if match is None:
             fail("tool-version-mismatch", name)
         versions[name] = match

@@ -74,7 +74,7 @@ class RecipeUpdateContextTests(unittest.TestCase):
                 if route.startswith("desktop-"):
                     setting_names += ["updateArchitecture", "updateSystemVersion"]
                 provider = {"id": "actual-update-fixture", "root": "package", "argv": ["node", "--import", "./deny-network.mjs", "verification/update-runner.mjs", route],
-                            "cwd": ".", "prepare": [], "tools": {"node": "26.5.0"}, "fixtures": ["web/test/fixtures/store-latest.json"],
+                            "cwd": ".", "prepare": [], "tools": {"node": "26.5"}, "fixtures": ["web/test/fixtures/store-latest.json"],
                             "locks": [], "network": False, "timeoutSeconds": 30, "expectedExit": 0, "scope": "required-local",
                             "requirements": ["external:published-update-service"],
                             "execution": {"kind": "provider", "simulation": True, "operations": ["update-get"], "settings": sorted(setting_names),

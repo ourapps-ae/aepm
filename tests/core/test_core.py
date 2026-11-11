@@ -337,6 +337,27 @@ class CoreTests(unittest.TestCase):
             validate_component(c)
         self.assertEqual(raised.exception.code, "artefact-self-component")
 
+    def test_artefact_without_component_condition_and_shared_destination(self):
+        plain = self.component["artefacts"][0]
+        c = copy.deepcopy(self.component)
+        c["artefacts"] = [{**plain, "component": "ourapps-ae/video"}, {**plain, "withoutComponent": "ourapps-ae/video"}]
+        self.assertEqual(len(validate_component(c)["artefacts"]), 2)
+        upper = {**plain, "destination": plain["destination"].upper(), "withoutComponent": "ourapps-ae/video"}
+        self.assertEqual(len(validate_component({**c, "artefacts": [c["artefacts"][0], upper]})["artefacts"]), 2)
+        for artefacts, code in (
+                ([plain, plain], "duplicate-value"),
+                ([{**plain, "component": "ourapps-ae/video"}, {**plain, "component": "ourapps-ae/video"}], "duplicate-value"),
+                ([{**plain, "component": "ourapps-ae/video"}, {**plain, "withoutComponent": "ourapps-ae/audio"}], "duplicate-value"),
+                ([{**plain, "component": "ourapps-ae/video"}, plain], "duplicate-value"),
+                ([{**plain, "component": "ourapps-ae/video"}, {**plain, "withoutComponent": "ourapps-ae/video"},
+                  {**plain, "withoutComponent": "ourapps-ae/video"}], "duplicate-value"),
+                ([{**plain, "component": "ourapps-ae/video", "withoutComponent": "ourapps-ae/video"}], "artefact-condition"),
+                ([{**plain, "withoutComponent": "ourapps-ae/sample"}], "artefact-self-component"),
+                ([{**plain, "withoutComponent": "other/name"}], "invalid-name")):
+            with self.subTest(artefacts=artefacts), self.assertRaises(AepmError) as raised:
+                validate_component({**c, "artefacts": artefacts})
+            self.assertEqual(raised.exception.code, code)
+
     def test_artefact_component_is_bound_into_the_package_digest(self):
         plain = pack(self.source, self.store)
         self.component["artefacts"][0]["component"] = "ourapps-ae/other"

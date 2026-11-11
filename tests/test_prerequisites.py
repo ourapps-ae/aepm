@@ -45,7 +45,7 @@ class PrerequisiteTests(unittest.TestCase):
 
     def test_empty_requirements_still_check_installed_tools(self):
         suite = {**self.manifest["verification"][0], "package": "a" * 64,
-                 "tools": {"aepm_nonexistent_compiler": "1.0.0"}}
+                 "tools": {"aepm_nonexistent_compiler": "1.0"}}
         result = execute_suite(suite, self.root / "package", False, self.root / "logs")
         self.assertEqual((result["status"], result["reason"]), ("blocked", "tool-unavailable"))
 

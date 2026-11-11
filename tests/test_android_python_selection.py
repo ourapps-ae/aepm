@@ -40,7 +40,7 @@ class PythonSelectionTests(fixtures.GuardedTests):
         shim.write_bytes(b"older shim")
         shim.chmod(0o755)
         old_path = os.pathsep.join([str(shim_dir), str(self.root), os.defpath])
-        tools = {"java": "17", "python3": "3.12.8"}
+        tools = {"java": "17", "python3": "3.12"}
         home = self.root / "private/home"
         with patch.dict(os.environ, {"PATH": old_path}):
             self.assertEqual(shutil.which("python3"), str(shim))
@@ -129,7 +129,7 @@ class PythonSelectionTests(fixtures.GuardedTests):
 
     def test_resolution_and_launch_refuse_late_alias_change(self):
         selection, _, context = self.selection()
-        tools = {"java": "17", "python3": "3.12.8"}
+        tools = {"java": "17", "python3": "3.12"}
         with selection.scoped():
             observer, proxy, _ = self.observer(selection)
             environment = proxy.tool_environment(self.root / "home", tools, context["resources"])
@@ -146,8 +146,8 @@ class PythonSelectionTests(fixtures.GuardedTests):
             with self.subTest(output=output), patch.object(contextual, "resolve_command", return_value=["fake-python", "--version"]), \
                     patch.object(contextual, "run", return_value=(0, 0, "", output)):
                 if matched:
-                    self.assertEqual(contextual.tool_versions({"tools": {"python3": "3.12.8"}}, self.root, {}), {"python3": "3.12.8"})
+                    self.assertEqual(contextual.tool_versions({"tools": {"python3": "3.12"}}, self.root, {}), {"python3": "3.12.8"})
                 else:
                     with self.assertRaises(AepmError) as caught:
-                        contextual.tool_versions({"tools": {"python3": "3.12.8"}}, self.root, {})
+                        contextual.tool_versions({"tools": {"python3": "3.12"}}, self.root, {})
                     self.assertEqual(caught.exception.code, "tool-version-mismatch")

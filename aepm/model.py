@@ -438,10 +438,12 @@ def validate_component(value: object) -> Component:
         if any("/".join(parts[:i]) in folded for i in range(1, len(parts))):
             fail("path-collision", p)
     for item in array(c["artefacts"], "artefacts"):
-        fields(item, "source destination template executable", "artefacts", "component")
-        if "component" in item:
-            if name(item["component"], "artefacts.component") == identity["name"]:
-                fail("artefact-self-component", "artefacts.component")
+        fields(item, "source destination template executable", "artefacts", "component withoutComponent")
+        if "component" in item and "withoutComponent" in item:
+            fail("artefact-condition", "artefacts")
+        for condition in ("component", "withoutComponent"):
+            if condition in item and name(item[condition], "artefacts." + condition) == identity["name"]:
+                fail("artefact-self-component", "artefacts." + condition)
         required_paths.append(item["source"])
         safe_path(item["destination"], "artefacts.destination")
         if item["destination"].split("/")[0].casefold() == ".aepm":
@@ -450,7 +452,16 @@ def validate_component(value: object) -> Component:
         boolean(item["executable"], "artefacts.executable")
         if file_modes.get(item["source"]) != item["executable"]:
             fail("mode-mismatch", "artefacts.source")
-    unique([a["destination"] for a in c["artefacts"]], "artefacts", folded=True)
+    sharing: dict[str, list[dict]] = {}
+    for item in c["artefacts"]:
+        sharing.setdefault(item["destination"].casefold(), []).append(item)
+    for items in sharing.values():
+        # One destination is shared only by the two sides of one condition: `component: X` and `withoutComponent: X`.
+        if len(items) == 1:
+            continue
+        sides = sorted((key, item[key]) for item in items for key in ("component", "withoutComponent") if key in item)
+        if len(items) != 2 or len(sides) != 2 or sides[0][0] == sides[1][0] or sides[0][1] != sides[1][1]:
+            fail("duplicate-value", "artefacts")
     for dep in array(c["dependencies"], "dependencies"):
         requirement(dep, "dependencies")
     unique([d["name"] for d in c["dependencies"]], "dependencies")
@@ -518,7 +529,8 @@ def validate_component(value: object) -> Component:
             fail("expected-object", "verification.tools")
         for tool, ver in suite["tools"].items():
             text(tool, "verification.tools")
-            text(ver, "verification.tools")
+            if type(ver) is not str or not re.fullmatch(r"(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*)){0,2}", ver):
+                fail("invalid-tool-version", "verification.tools." + tool)
         for key in ("fixtures", "locks"):
             for p in array(suite[key], "verification." + key, key == "fixtures"):
                 safe_path(p, "verification." + key)
