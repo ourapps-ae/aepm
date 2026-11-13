@@ -466,7 +466,7 @@ class ApplicationTests(unittest.TestCase):
         return [item["path"] for item in assembly["files"]]
 
     def test_conditional_artefact_installs_only_with_its_component(self):
-        sample = "ourapps-ae/sample"
+        sample = "sample"
         self.conditional_recipe([("optional.txt", sample)])
         with_component = self.install()
         self.assertIn("optional.txt", self.owned(with_component))
@@ -485,7 +485,7 @@ class ApplicationTests(unittest.TestCase):
         self.assertGreater(Path(output["png"]).stat().st_size, 100)
 
     def test_stand_in_artefact_installs_only_without_its_component(self):
-        sample = "ourapps-ae/sample"
+        sample = "sample"
         entries = [("video.ts", sample), ("video.ts", sample, "withoutComponent"), ("only-without.txt", sample, "withoutComponent")]
         self.conditional_recipe(entries)
         with_component = self.install()
@@ -502,16 +502,13 @@ class ApplicationTests(unittest.TestCase):
         export_design(without, self.root / "diagrams")
 
     def test_unconditional_and_other_component_artefacts_install(self):
-        self.conditional_recipe([("plain.txt", None), ("missing.txt", "ourapps-ae/absent")])
+        self.conditional_recipe([("plain.txt", None), ("missing.txt", "absent")])
         assembly = self.install()
         self.assertEqual(self.owned(assembly), ["app.txt", "components/sample/value.txt", "plain.txt"])
 
     def test_collision_and_owner_rules_apply_only_to_installed_artefacts(self):
-        sample = "ourapps-ae/sample"
-        for entries, code in ((
-                [("notes", None), ("notes/extra.txt", sample)], "artefact-collision"),
-                ([("components/sample/value.txt", sample)], "artefact-owner"),
-                ([("components/other/x.txt", sample)], "artefact-owner")):
+        sample = "sample"
+        for entries, code in (([("notes", None), ("notes/extra.txt", sample)], "artefact-collision"),):
             with self.subTest(entries=entries):
                 self.conditional_recipe(entries)
                 with self.assertRaisesRegex(AepmError, code):
@@ -522,21 +519,33 @@ class ApplicationTests(unittest.TestCase):
                 self.assertNotIn(entries[-1][0], self.owned(installed))
                 shutil.rmtree(self.root / "installed")
 
+    def test_component_files_install_under_their_slot_id(self):
+        self.definition["components"][0]["id"] = "deck"
+        installed = self.install()
+        self.assertEqual(self.owned(installed), ["app.txt", "components/deck/value.txt"])
+        self.assertEqual((self.root / "installed/components/deck/value.txt").read_text(), "count=7\nversion=0.1.0\n")
+        self.assertFalse((self.root / "installed/components/sample").exists())
+        self.assertEqual([item["id"] for item in installed["design"]["instances"]][-1], "deck")
+        self.assertEqual(read_assembly(self.root / "installed"), installed)
+        retained_manifests(self.root / "installed", self.policy)
+        verify_application(self.root / "installed", self.policy, True)
+
     def test_listed_components_install_only_when_all_are_present(self):
-        both = ["ourapps-ae/sample", "ourapps-ae/absent"]
+        both = ["sample", "absent"]
         manifest = {"artefacts": [{"destination": "plain"}, {"destination": "both", "component": both},
-                                  {"destination": "one", "component": "ourapps-ae/sample"}]}
-        for present, expected in (({"ourapps-ae/sample", "ourapps-ae/absent"}, ["plain", "both", "one"]),
-                                  ({"ourapps-ae/sample"}, ["plain", "one"]), (set(), ["plain"])):
+                                  {"destination": "one", "component": "sample"},
+                                  {"destination": "not-both", "withoutComponent": both}]}
+        for present, expected in (({"sample", "absent"}, ["plain", "both", "one"]),
+                                  ({"sample"}, ["plain", "one", "not-both"]), (set(), ["plain", "not-both"])):
             with self.subTest(present=present):
                 self.assertEqual([item["destination"] for item in installed_artefacts(manifest, present)], expected)
-        self.conditional_recipe([("both.txt", both), ("one.txt", "ourapps-ae/sample")])
+        self.conditional_recipe([("both.txt", both), ("one.txt", "sample")])
         installed = self.install()
         self.assertEqual(self.owned(installed), ["app.txt", "components/sample/value.txt", "one.txt"])
         self.assertEqual(read_assembly(self.root / "installed"), installed)
 
     def test_update_stages_conditional_artefact_when_component_is_present(self):
-        self.conditional_recipe([("optional.txt", "ourapps-ae/sample")])
+        self.conditional_recipe([("optional.txt", "sample")])
         shutil.rmtree(self.root / "installed", ignore_errors=True)
         value = update.propose(self.app, self.definition, self.store, self.policy, True)
         self.assertIn("optional.txt", [item["path"] for item in value["changes"]])

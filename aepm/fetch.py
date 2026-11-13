@@ -128,3 +128,19 @@ def fetch(store: Path, packages: list[tuple[str, str]], *, with_dependencies: bo
             needed += [(item["name"], item["version"]) for item in loads(payloads["recipe.json"], "recipe.json")["components"]]
         pending.extend(item for item in needed if item not in done)
     return results
+
+
+@guarded
+def providers(provided_types: list[str], *, origin: str = CATALOGUE) -> list[tuple[str, str]]:
+    """(name, latest version) of every catalogue component providing all of the given interface types."""
+    found = None
+    for interface in provided_types:
+        value = _json(f"{origin.rstrip('/')}/api/components?provides={urllib.parse.quote(interface, safe='')}&limit=100")
+        if value is None or type(value.get("components")) is not list:
+            fail("invalid-response", "components")
+        names = set()
+        for item in value["components"]:
+            if type(item) is dict and type(item.get("name")) is str and type(item.get("version")) is str:
+                names.add((name(item["name"], "components.name"), version(item["version"], "components.version")))
+        found = names if found is None else found & names
+    return sorted(found or [])

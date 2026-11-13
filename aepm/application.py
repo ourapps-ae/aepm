@@ -66,16 +66,30 @@ def validate_definition(value: object) -> Definition:
 
 
 def present_components(definition):
-    return {definition["recipe"]["name"], *(item["name"] for item in definition["components"])}
+    """The slot ids the design fills."""
+    return {item["id"] for item in definition["components"]}
 
 
 def installed_artefacts(manifest, present):
-    """Unconditional artefacts, those whose `component` (one name, or a list whose names are all) is in the design and those
-    whose `withoutComponent` is not."""
-    def wanted(value):
-        return value is None or all(item in present for item in ([value] if isinstance(value, str) else value))
+    """Unconditional artefacts; those whose `component` slot (or every slot of its list) is filled; those whose
+    `withoutComponent` slot (or some slot of its list) is not."""
+    def filled(value):
+        return all(item in present for item in ([value] if isinstance(value, str) else value))
     return [item for item in manifest["artefacts"]
-            if wanted(item.get("component")) and ("withoutComponent" not in item or item["withoutComponent"] not in present)]
+            if ("component" not in item or filled(item["component"]))
+            and ("withoutComponent" not in item or not filled(item["withoutComponent"]))]
+
+
+def install_path(name, package, slot, is_recipe):
+    """Where an artefact lands: components/<package short name>/... of a component goes to components/<slot id>/..."""
+    own = "components/" + package.split("/", 1)[1] + "/"
+    if is_recipe:
+        if name.split("/")[0].casefold() == "components":
+            fail("artefact-owner", name)
+        return name
+    if not name.startswith(own):
+        fail("artefact-owner", name)
+    return "components/" + slot + "/" + name[len(own):]
 
 
 def configuration(declarations, supplied):
@@ -233,7 +247,8 @@ def validate_retained_assembly(root, assembly, manifests):
         generated_instances[instance_id] = {"id": instance_id, "name": definition["title"] if is_recipe else visual["name"],
                                             "definition": visual["id"], "configuration": values}
         for artefact in installed_artefacts(manifest, present):
-            name = substitute(artefact["destination"], manifest["collect"], values, destination=True)
+            name = install_path(substitute(artefact["destination"], manifest["collect"], values, destination=True),
+                                ref["name"], instance_id, is_recipe)
             data = rooted(package_root, artefact["source"]).read_bytes()
             if artefact["template"]:
                 text = data.decode("utf-8")
@@ -317,13 +332,11 @@ def assemble(definition: Definition, lock: Lock, store: Path, destination: Path,
             instances.append({"id": instance_id, "name": definition["title"] if is_recipe else visual["name"],
                               "definition": visual["id"], "configuration": deepcopy(values)})
             for artefact in installed_artefacts(manifest, present):
-                name = substitute(artefact["destination"], manifest["collect"], values, destination=True)
+                name = install_path(substitute(artefact["destination"], manifest["collect"], values, destination=True),
+                                    ref["name"], instance_id, is_recipe)
                 relative(name)
                 if name.split("/")[0].casefold() == ".aepm":
                     fail("reserved-destination", name)
-                prefix = "components/" + ref["name"].split("/")[1] + "/"
-                if (not is_recipe and not name.startswith(prefix)) or (is_recipe and name.startswith("components/")):
-                    fail("artefact-owner", name)
                 folded = name.casefold()
                 if folded in seen or any(folded.startswith(old + "/") or old.startswith(folded + "/") for old in seen):
                     fail("artefact-collision", name)

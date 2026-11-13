@@ -58,6 +58,12 @@ def parser():
     design.add_argument("--store", type=Path, required=True)
     design.add_argument("--answers", type=Path)
     design.add_argument("--out", type=Path, required=True)
+    design.add_argument("--substitute", action="append", default=[])
+    other = commands.add_parser("alternatives")
+    other.add_argument("recipe")
+    other.add_argument("slot")
+    other.add_argument("--store", type=Path, required=True)
+    other.add_argument("--from", dest="origin", default="https://ourapps.app")
     get = commands.add_parser("fetch")
     get.add_argument("packages", nargs="+")
     get.add_argument("--store", type=Path, required=True)
@@ -102,9 +108,30 @@ def dispatch(args):
         from .fetch import fetch
         return fetch(args.store, [identity(item) for item in args.packages], with_dependencies=args.with_dependencies,
                      origin=args.origin)
+    if command == "alternatives":
+        from .fetch import fetch, providers
+        from .recipe import World, slot_fit
+        world = World.from_store(*identity(args.recipe), args.store)
+        if args.slot not in world.slots:
+            fail("unknown-slot", args.slot)
+        spec = world.slots[args.slot]
+        found = providers([item["type"] for item in spec["class"]["provides"]], origin=args.origin)
+        fetch(args.store, found, origin=args.origin)
+        result = []
+        for package_name, package_version in found:
+            candidate = World.from_store(*identity(args.recipe), args.store, {args.slot: (package_name, package_version)})
+            reasons = slot_fit(candidate, args.slot, candidate.filling[args.slot])
+            result.append({"name": package_name, "version": package_version, "fits": not reasons, "reasons": reasons})
+        return result
     if command in ("design", "questions"):
         from .recipe import World, evaluate, questions
-        world = World.from_store(*identity(args.recipe), args.store)
+        substitutes = {}
+        for value in getattr(args, "substitute", []):
+            slot, separator, package = value.partition("=")
+            if not separator or not slot:
+                fail("arguments", "substitute")
+            substitutes[slot] = identity(package)
+        world = World.from_store(*identity(args.recipe), args.store, substitutes)
         if command == "questions":
             return questions(world.recipe)
         answers = load(args.answers) if args.answers is not None else {}

@@ -397,6 +397,24 @@ def package_ref(value: object) -> PackageRef:
     return cast(PackageRef, value)
 
 
+SLOT = re.compile(r"[A-Za-z][A-Za-z0-9_.-]{0,63}")
+
+
+def slot_set(value: object) -> list:
+    """The slot ids of an artefact condition: one id, or a list of two or more different ids."""
+    return [value] if type(value) is str else list(value) if type(value) is list else []
+
+
+def slot_condition(value: object, path: str) -> object:
+    ids = slot_set(value)
+    if not ids or (type(value) is list and (len(ids) < 2 or len(set(map(str, ids))) != len(ids))):
+        fail("artefact-condition", path)
+    for item in ids:
+        if type(item) is not str or not SLOT.fullmatch(item) or item == "application":
+            fail("invalid-slot", path)
+    return value
+
+
 @guarded
 def validate_component(value: object) -> Component:
     c = fields(value, "format kind identity facilities documents collect files artefacts dependencies provides requires visual capabilities infrastructure verification upgrade", "component")
@@ -437,24 +455,24 @@ def validate_component(value: object) -> Component:
         parts = p.casefold().split("/")
         if any("/".join(parts[:i]) in folded for i in range(1, len(parts))):
             fail("path-collision", p)
+    own = "components/" + identity["name"].split("/", 1)[1] + "/"
     for item in array(c["artefacts"], "artefacts"):
         fields(item, "source destination template executable", "artefacts", "component withoutComponent")
         if "component" in item and "withoutComponent" in item:
             fail("artefact-condition", "artefacts")
-        if type(item.get("component")) is list:
-            # A list of two or more names: installed only when every one of them is in the design.
-            if len(item["component"]) < 2 or len(set(map(str, item["component"]))) != len(item["component"]):
-                fail("artefact-condition", "artefacts.component")
-            conditions = [("component", value) for value in item["component"]]
-        else:
-            conditions = [(key, item[key]) for key in ("component", "withoutComponent") if key in item]
-        for condition, value in conditions:
-            if name(value, "artefacts." + condition) == identity["name"]:
-                fail("artefact-self-component", "artefacts." + condition)
+        for condition in ("component", "withoutComponent"):
+            if condition in item:
+                slot_condition(item[condition], "artefacts." + condition)
         required_paths.append(item["source"])
         safe_path(item["destination"], "artefacts.destination")
         if item["destination"].split("/")[0].casefold() == ".aepm":
             fail("reserved-path", "artefacts.destination")
+        # A component writes only under components/<its short name>/, which aepm installs at components/<slot id>/;
+        # a recipe's own files stay outside components/.
+        if c["kind"] == "component" and not item["destination"].startswith(own):
+            fail("artefact-owner", "artefacts.destination")
+        if c["kind"] == "recipe" and item["destination"].split("/")[0].casefold() == "components":
+            fail("artefact-owner", "artefacts.destination")
         boolean(item["template"], "artefacts.template")
         boolean(item["executable"], "artefacts.executable")
         if file_modes.get(item["source"]) != item["executable"]:
@@ -466,9 +484,7 @@ def validate_component(value: object) -> Component:
         # One destination is shared only by the two sides of one condition: `component: X` and `withoutComponent: X`.
         if len(items) == 1:
             continue
-        if any(type(item.get("component")) is list for item in items):
-            fail("duplicate-value", "artefacts")
-        sides = sorted((key, item[key]) for item in items for key in ("component", "withoutComponent") if key in item)
+        sides = sorted((key, frozenset(slot_set(item[key]))) for item in items for key in ("component", "withoutComponent") if key in item)
         if len(items) != 2 or len(sides) != 2 or sides[0][0] == sides[1][0] or sides[0][1] != sides[1][1]:
             fail("duplicate-value", "artefacts")
     for dep in array(c["dependencies"], "dependencies"):

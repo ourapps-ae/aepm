@@ -33,58 +33,178 @@ def read(path):
     return json.loads(Path(path).read_text())
 
 
-class World:
-    """The recipe, the components' manifests and suitability files (by recipe component id), and the recipe's own manifest."""
+class Package:
+    """One component: its manifest, suitability profiles and packaged file bytes."""
 
-    def __init__(self, recipe, manifests, suitability):
-        self.recipe, self.manifests, self.suitability = recipe, manifests, suitability
+    def __init__(self, manifest, read_file):
+        self.manifest, self._read = manifest, read_file
+        self.name, self.version = manifest["identity"]["name"], manifest["identity"]["version"]
+        data = self.file("suitability.json")
+        self.suitability = json.loads(data) if data is not None else {"profiles": []}
+
+    def file(self, path):
+        """Bytes of a packaged file, or None."""
+        listed = {item["path"] for item in self.manifest["files"]}
+        return self._read(path) if path in listed else None
+
+
+class World:
+    """A recipe, the component in each of its slots, the job candidates, and the recipe's own manifest.
+
+    `manifests` and `suitability` are by slot id (and `application`) for the components that fill the slots."""
+
+    def __init__(self, recipe, application, packages, substitutes=None):
+        self.recipe, self.application, self.packages = recipe, application, packages
+        self.substitutes = dict(substitutes or {})
+        self.slots = {slot["id"]: slot for slot in recipe["components"]}
+        self.filling = {}
+        for slot in recipe["components"]:
+            key = self.substitutes.get(slot["id"]) or (slot["preferred"]["name"], slot["preferred"]["version"])
+            if key in packages:
+                self.filling[slot["id"]] = packages[key]
+        self.manifests = {slot: package.manifest for slot, package in self.filling.items()}
+        self.manifests[APPLICATION] = application
+        self.suitability = {slot: package.suitability for slot, package in self.filling.items()}
+
+    def wanted(self):
+        """(name, version) of every package the recipe may place: preferred components and job candidates."""
+        keys = [(slot["preferred"]["name"], slot["preferred"]["version"]) for slot in self.recipe["components"]]
+        for job in self.recipe.get("jobs", []):
+            preferred = self.slots.get(job.get("slot"), {}).get("preferred", {})
+            keys += [candidate_key(candidate, preferred) for candidate in job["candidates"]]
+        return keys
 
     @classmethod
     def from_directories(cls, recipe_directory, components_directory):
-        """Source layout: recipe_directory holds recipe.json and component.json; components_directory/<name>/ each component."""
+        """Source layout: recipe_directory holds recipe.json and component.json; components_directory/<short name>/ each
+        component, at the version its manifest declares."""
         recipe = read(Path(recipe_directory) / "recipe.json")
-        manifests, suitability = {}, {}
-        for component in recipe["components"]:
-            directory = Path(components_directory) / component["name"].split("/")[1]
+        packages = {}
+        for directory in sorted(Path(components_directory).iterdir()):
             if (directory / "component.json").is_file():
-                manifests[component["id"]] = read(directory / "component.json")
-                suitability[component["id"]] = read(directory / "suitability.json") if (directory / "suitability.json").is_file() else {"profiles": []}
-        manifests[APPLICATION] = read(Path(recipe_directory) / "component.json")
-        return cls(recipe, manifests, suitability)
+                package = Package(read(directory / "component.json"), lambda path, root=directory: (root / path).read_bytes())
+                packages[(package.name, package.version)] = package
+        return cls(recipe, read(Path(recipe_directory) / "component.json"), packages)
 
     @classmethod
-    def from_store(cls, name, version, store):
-        """Everything from stored archives: the recipe package `name` at `version` and each component at its pinned version."""
+    def from_store(cls, name, version, store, substitutes=None):
+        """Everything from stored archives: the recipe package `name` at `version`, every preferred component and job
+        candidate, and each substitute {slot: (name, version)}; a substitute missing from the store is refused."""
         from .bundle import read_package
         from .model import fail, loads
         store = Path(store)
         entries = {(e["name"], e["version"]): e for e in loads((store / "catalogue.json").read_bytes(), "catalogue")["entries"]}
 
-        def package(package_name, package_version):
-            entry = entries.get((package_name, package_version))
-            return None if entry is None else read_package(entry, store)
+        def package(key):
+            entry = entries.get(key)
+            if entry is None:
+                return None
+            manifest, payloads = read_package(entry, store)
+            return Package(manifest, payloads.__getitem__)
 
-        found = package(name, version)
+        found = entries.get((name, version))
         if found is None:
             fail("unknown-package", f"{name}@{version}")
-        manifest, payloads = found
+        manifest, payloads = read_package(found, store)
         if manifest["kind"] != "recipe" or "recipe.json" not in payloads:
             fail("not-a-recipe", f"{name}@{version}")
         recipe = loads(payloads["recipe.json"], "recipe.json")
         if (recipe.get("name"), recipe.get("version")) != (name, version):
             fail("recipe-identity", "recipe.json")
-        manifests, suitability = {}, {}
-        for component in recipe["components"]:
-            stored = package(component["name"], component["version"])
-            if stored is not None:
-                manifests[component["id"]] = stored[0]
-                suitability[component["id"]] = (loads(stored[1]["suitability.json"], "suitability.json")
-                                                if "suitability.json" in stored[1] else {"profiles": []})
-        manifests[APPLICATION] = manifest
-        return cls(recipe, manifests, suitability)
+        for slot, key in (substitutes or {}).items():
+            if key not in entries:
+                fail("unknown-package", f"{slot}={key[0]}@{key[1]}")
+        world = cls(recipe, manifest, {})
+        keys = set(world.wanted()) | set((substitutes or {}).values())
+        packages = {key: loaded for key in sorted(keys) if (loaded := package(key)) is not None}
+        return cls(recipe, manifest, packages, substitutes)
 
     def with_recipe(self, recipe):
-        return World(recipe, self.manifests, self.suitability)
+        return World(recipe, self.application, self.packages, self.substitutes)
+
+
+def candidate_key(candidate, preferred):
+    """A job candidate's (name, version): its own version, or the slot's preferred version for the preferred component."""
+    if "version" in candidate:
+        return candidate["component"], candidate["version"]
+    return candidate["component"], preferred.get("version") if preferred.get("name") == candidate["component"] else None
+
+
+# ---- slots: the class of a slot and the fit rule (component standard, "Recipe slots and component classes") ----
+
+SETTING_TYPES = {"string": "string", "boolean": "boolean", "integer": "integer"}
+
+
+def setting_schema(declaration):
+    """The JSON Schema property a class uses for one setting: its type, and for a string its grammar as an anchored pattern."""
+    schema = {"type": SETTING_TYPES[declaration["type"]]}
+    if declaration["type"] == "string":
+        schema["pattern"] = "^" + GRAMMARS[declaration["grammar"]] + "$"
+    return schema
+
+
+def module_paths(documents):
+    """platform -> entry path for every x-ourapps-modules map of the class's interface documents."""
+    modules = []
+    for document in documents:
+        try:
+            value = json.loads(document)
+        except ValueError:
+            continue
+        for platform, path in (value.get("x-ourapps-modules") or {}).items() if isinstance(value, dict) else ():
+            modules.append((platform, path))
+    return modules
+
+
+NATIVE = ("apple", "android")
+
+
+def fit(slot_class, package, preferred):
+    """Why `package` does not fit `slot_class` (rules 1 to 4), or an empty list when it fits. `preferred` is the slot's
+    preferred component, whose interface documents define the class's documents."""
+    reasons = []
+    manifest = package.manifest
+    provided = {(port["type"], port["version"]): port for port in manifest["provides"]}
+    preferred_ports = {(port["type"], port["version"]): port for port in preferred.manifest["provides"]}
+    documents = []
+    for interface in slot_class["provides"]:
+        key = (interface["type"], interface["version"])
+        theirs, ours = provided.get(key), preferred_ports.get(key)
+        if theirs is None:
+            reasons.append(f"provides:{key[0]}@{key[1]}")
+            continue
+        expected = preferred.file(ours["path"]) if ours is not None else None
+        if expected is None or package.file(theirs["path"]) != expected:
+            reasons.append(f"document:{key[0]}@{key[1]}")
+            continue
+        documents.append(expected)
+    allowed = {(interface["type"], interface["version"]) for interface in slot_class["requires"]}
+    for port in manifest["requires"]:
+        if not port.get("optional") and (port["type"], port["version"]) not in allowed:
+            reasons.append(f"requires:{port['type']}@{port['version']}")
+    settings = {item["id"]: item for item in manifest["collect"]}
+    schema = slot_class["configuration"]
+    for name, wanted in schema.get("properties", {}).items():
+        declaration = settings.get(name)
+        if declaration is None:
+            reasons.append(f"setting:{name}")
+        elif {key: wanted.get(key) for key in setting_schema(declaration)} != setting_schema(declaration) or wanted.get("type") != setting_schema(declaration)["type"]:
+            reasons.append(f"setting-type:{name}")
+    required = set(schema.get("required", []))
+    for declaration in manifest["collect"]:
+        if declaration["required"] and "default" not in declaration and declaration["id"] not in required:
+            reasons.append(f"unset-setting:{declaration['id']}")
+    short = "components/" + package.name.split("/", 1)[1] + "/"
+    destinations = [item["destination"] for item in manifest["artefacts"]]
+    for platform, path in module_paths(documents):
+        if not isinstance(path, str):
+            reasons.append(f"module:{platform}")
+        elif platform in NATIVE:
+            if not any(item.startswith(short + path.rstrip("/") + "/") for item in destinations):
+                reasons.append(f"module:{platform}:{path}")
+        elif short + path not in destinations:
+            reasons.append(f"module:{platform}:{path}")
+    return reasons
 
 
 def questions(recipe):
@@ -464,6 +584,8 @@ class _Evaluation:
         self.components = {c["id"]: c for c in self.recipe["components"]}
         self.values, self.asked = {}, {}
         self.in_progress = set()
+        self.manifests = dict(world.manifests)
+        self.filling = dict(world.filling)
 
     def error(self, code, path):
         item = {"code": code, "path": path}
@@ -541,9 +663,19 @@ class _Evaluation:
         for q in recipe["questions"]:
             self.resolve(q["id"])
 
-        for c in recipe["components"]:  # unknown components
-            if c["id"] not in self.world.manifests:
+        for slot in self.world.substitutes:
+            if slot not in self.components:
+                self.error("unknown-slot", slot)
+        for c in recipe["components"]:  # unknown components, and the preferred component must fit its slot
+            if c["id"] not in self.filling:
                 self.error("unknown-component", c["id"])
+                continue
+            preferred = self.world.packages.get((c["preferred"]["name"], c["preferred"]["version"]))
+            if preferred is None:
+                self.error("unknown-component", c["id"])
+                continue
+            for reason in fit(c["class"], self.filling[c["id"]], preferred):
+                self.error("unfit", f"{c['id']}:{reason}")
         if self.errors:
             return self.failure()
 
@@ -564,7 +696,8 @@ class _Evaluation:
             "id": self.application_id,
             "title": recipe["title"],
             "recipe": {"name": recipe["name"], "version": recipe["version"]},
-            "components": [{"id": c["id"], "name": c["name"], "version": c["version"], "configuration": settings[c["id"]]} for c in included_components],
+            "components": [{"id": c["id"], "name": self.filling[c["id"]].name, "version": self.filling[c["id"]].version,
+                            "configuration": settings[c["id"]]} for c in included_components],
             "configuration": settings[APPLICATION],
             "design": {"definitions": [], "instances": [], "connections": connections},
             "updatePolicy": "patch",
@@ -601,22 +734,37 @@ class _Evaluation:
         return False
 
     def select(self, included):
+        """Rule 7 per job: the job's slot takes the lowest-cost candidate that fits the scale; a substituted slot is fixed."""
         selections, writes = {}, {}
         band = self.band()
+        for slot, (name, version) in self.world.substitutes.items():
+            if slot in included:
+                selections[slot] = {"component": name, "version": version, "reason": "substituted"}
         for job in self.recipe.get("jobs", []):
+            slot = job.get("slot")
+            if slot not in self.components:
+                self.error("unknown-slot", f"jobs.{job['id']}.{slot}")
+                continue
+            if slot not in included or slot in self.world.substitutes:
+                continue  # rule 15: a job whose slot is left out selects nothing and cannot be uncovered
+            spec = self.components[slot]
+            preferred = self.world.packages[(spec["preferred"]["name"], spec["preferred"]["version"])]
             candidates = []
             for candidate in job["candidates"]:
-                cid = next((c["id"] for c in self.recipe["components"] if c["name"] == candidate["component"]), None)
-                if cid is None:
+                key = candidate_key(candidate, spec["preferred"])
+                package = self.world.packages.get(key)
+                if package is None:
                     self.error("unknown-component", f"jobs.{job['id']}.{candidate['component']}")
                     continue
-                if cid not in included or (candidate.get("includedWhen") is not None and not self.holds(candidate["includedWhen"])):
-                    continue  # rule 15: a job whose components are all left out selects nothing and cannot be uncovered
-                profile = next((p for p in self.world.suitability[cid]["profiles"] if p["id"] == candidate["profile"]), None)
+                for reason in fit(spec["class"], package, preferred):
+                    self.error("unfit", f"{slot}:{candidate['component']}:{reason}")
+                if candidate.get("includedWhen") is not None and not self.holds(candidate["includedWhen"]):
+                    continue
+                profile = next((p for p in package.suitability["profiles"] if p["id"] == candidate["profile"]), None)
                 if profile is None:
                     self.error("unknown-component", f"jobs.{job['id']}.{candidate['component']}.{candidate['profile']}")
                     continue
-                candidates.append((cid, candidate, profile))
+                candidates.append((package, candidate, profile))
             if not candidates:
                 continue
             override = job.get("overrideQuestion")
@@ -631,26 +779,26 @@ class _Evaluation:
                 self.error("uncovered", job["id"])
                 continue
             best = min(COST_RANK[c[2]["cost"]] for c in fitting)
-            winner = next(c for c in fitting if COST_RANK[c[2]["cost"]] == best)
-            cid, candidate, profile = winner
+            package, candidate, profile = next(c for c in fitting if COST_RANK[c[2]["cost"]] == best)
             why = f"scale {band['id'] if band else 'unstated'}; {len(fitting)} of {len(candidates)} candidates fit"
             if len(restricted) != len(candidates):
                 why += f"; the {override} answer {self.values[override]} named {len(restricted)}"
             why += f"; lowest cost {profile['cost']}"
-            selections[job["id"]] = {"component": candidate["component"], "profile": profile["id"], "reason": why}
+            selections[job["id"]] = {"component": package.name, "version": package.version, "profile": profile["id"], "reason": why}
+            self.filling[slot] = package
+            self.manifests[slot] = package.manifest
             # rule 23: a profile's own settings are applied after the recipe's configuration and before question sets.
             values = dict(profile.get("settings") or {})
-            # rule 17: rule 7 says the selection writes `server-host.provider` from "the provider name"; the setting is a slug and
-            # the provider name is prose, so the selected profile id (cloudflare-free, cloudflare-paid, own-hardware) is written.
-            if any(s["id"] == "provider" for s in self.world.manifests[cid]["collect"]):
+            # rule 17: the selection writes a `provider` setting from the selected profile id.
+            if any(s["id"] == "provider" for s in package.manifest["collect"]):
                 values.setdefault("provider", profile["id"])
-            writes[cid] = values
+            writes[slot] = values
         return selections, writes
 
     # ---- rules 5, 6: settings ----
 
     def declaration(self, instance, setting):
-        return next((s for s in self.world.manifests[instance]["collect"] if s["id"] == setting), None)
+        return next((s for s in self.manifests[instance]["collect"] if s["id"] == setting), None)
 
     def target(self, text):
         best = None
@@ -690,7 +838,7 @@ class _Evaluation:
         """Effective settings of every included instance: collect default < recipe configuration < selection < question sets."""
         out, origin = {}, {}
         for instance in self.order:
-            manifest = self.world.manifests[instance]
+            manifest = self.manifests[instance]
             values = {s["id"]: s["default"] for s in manifest["collect"] if "default" in s}
             configuration = {} if instance == APPLICATION else self.components[instance].get("configuration", {})
             for setting, value in {**configuration, **selected.get(instance, {})}.items():
@@ -727,7 +875,7 @@ class _Evaluation:
             origin[(instance, setting)] = f"answers.{winners[-1][0]}"
         # secret references and types; required settings
         for instance in self.order:
-            for decl in self.world.manifests[instance]["collect"]:
+            for decl in self.manifests[instance]["collect"]:
                 sid, path = decl["id"], f"{instance}.{decl['id']}"
                 if sid not in out[instance]:
                     if decl["required"]:
@@ -771,7 +919,7 @@ class _Evaluation:
             key = (c["target"]["instance"], c["target"]["port"])
             count[key] = count.get(key, 0) + 1
         for instance in self.order:
-            for port in self.world.manifests[instance]["requires"]:
+            for port in self.manifests[instance]["requires"]:
                 if port.get("optional"):
                     continue
                 if count.get((instance, port["id"]), 0) != 1:  # rule 20: no code for "connected twice"; it is reported as unconnected too
@@ -782,3 +930,10 @@ class _Evaluation:
 def to_json(result):
     """Canonical bytes: every object's keys sorted, two-space indent, a final newline."""
     return json.dumps(result, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+
+
+def slot_fit(world, slot, package):
+    """Why `package` does not fit `slot` of the world's recipe, or an empty list when it fits."""
+    spec = world.slots[slot]
+    preferred = world.packages[(spec["preferred"]["name"], spec["preferred"]["version"])]
+    return fit(spec["class"], package, preferred)

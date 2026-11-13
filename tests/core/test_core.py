@@ -33,7 +33,7 @@ def fixture(root, name="sample", version="0.1.0", dependencies=None):
          "documents": {"contract": "CONTRACT.md", "interfaces": ["interface.txt"],
                        "examples": ["example.json"], "licenceNotice": "NOTICE"},
          "collect": [], "files": [{"path": p, "executable": p == "run.sh"} for p in sorted(content)],
-         "artefacts": [{"source": "run.sh", "destination": "components/sample/run.sh",
+         "artefacts": [{"source": "run.sh", "destination": "components/" + name + "/run.sh",
                         "template": False, "executable": True}],
          "dependencies": dependencies or [], "provides": [], "requires": [],
          "visual": {"definition": "visual.json", "examples": ["example.json"],
@@ -318,71 +318,69 @@ class CoreTests(unittest.TestCase):
         self.assertNotEqual(plain["digest"], marked["digest"])
         self.assertIn(b'"optional":true', canonical(read_package(marked, other)[0]))
 
-    def test_artefact_component_condition(self):
+    def test_artefact_conditions_name_slot_ids(self):
         plain = self.component["artefacts"][0]
-        for value in ("ourapps-ae/other", "ourapps-ae/a1-b"):
-            with self.subTest(value=value):
-                c = copy.deepcopy(self.component)
-                c["artefacts"][0] = {**plain, "component": value}
-                self.assertEqual(validate_component(c)["artefacts"][0]["component"], value)
-        for value in ("ourapps-ae/sample", "other/name", "ourapps-ae/Upper", "", None, True, 1, [], {}):
-            with self.subTest(value=value):
-                c = copy.deepcopy(self.component)
-                c["artefacts"][0] = {**plain, "component": value}
-                with self.assertRaises(AepmError):
+        for key in ("component", "withoutComponent"):
+            for value in ("video", "web-host", "a1.b_c", ["web-host", "ourapps-release"]):
+                with self.subTest(key=key, value=value):
+                    c = copy.deepcopy(self.component)
+                    c["artefacts"][0] = {**plain, key: value}
+                    self.assertEqual(validate_component(c)["artefacts"][0][key], value)
+            for value, code in (("ourapps-ae/video", "invalid-slot"), ("application", "invalid-slot"), ("1x", "invalid-slot"),
+                                ("", "invalid-slot"), (None, "artefact-condition"), (1, "artefact-condition"),
+                                ({}, "artefact-condition"), ([], "artefact-condition"), (["video"], "artefact-condition"),
+                                (["video", "video"], "artefact-condition"), (["video", 1], "invalid-slot")):
+                with self.subTest(key=key, value=value), self.assertRaises(AepmError) as raised:
+                    c = copy.deepcopy(self.component)
+                    c["artefacts"][0] = {**plain, key: value}
                     validate_component(c)
-        c = copy.deepcopy(self.component)
-        c["artefacts"][0] = {**plain, "component": "ourapps-ae/sample"}
+                self.assertEqual(raised.exception.code, code)
+
+    def test_component_artefacts_stay_under_their_own_folder(self):
+        plain = self.component["artefacts"][0]
+        for destination in ("components/other/run.sh", "run.sh", "components/samples/run.sh", "Components/sample/run.sh"):
+            c = copy.deepcopy(self.component)
+            c["artefacts"][0] = {**plain, "destination": destination}
+            with self.subTest(destination=destination), self.assertRaises(AepmError) as raised:
+                validate_component(c)
+            self.assertEqual(raised.exception.code, "artefact-owner")
+        recipe = copy.deepcopy(self.component)
+        recipe["kind"] = "recipe"
         with self.assertRaises(AepmError) as raised:
-            validate_component(c)
-        self.assertEqual(raised.exception.code, "artefact-self-component")
+            validate_component(recipe)
+        self.assertEqual(raised.exception.code, "artefact-owner")
+        recipe["artefacts"][0] = {**plain, "destination": "app/run.sh"}
+        validate_component(recipe)
 
-    def test_artefact_component_list_condition(self):
+    def test_shared_destination_only_for_one_condition_and_its_mirror(self):
         plain = self.component["artefacts"][0]
         c = copy.deepcopy(self.component)
-        c["artefacts"][0] = {**plain, "component": ["ourapps-ae/other", "ourapps-ae/video"]}
-        self.assertEqual(validate_component(c)["artefacts"][0]["component"], ["ourapps-ae/other", "ourapps-ae/video"])
-        for value, code in ((["ourapps-ae/other"], "artefact-condition"), (["ourapps-ae/other", "ourapps-ae/other"], "artefact-condition"),
-                            (["ourapps-ae/other", "ourapps-ae/sample"], "artefact-self-component"), (["ourapps-ae/other", "Upper"], "invalid-name"),
-                            (["ourapps-ae/other", 1], "invalid-name")):
-            with self.subTest(value=value), self.assertRaises(AepmError) as raised:
-                validate_component({**c, "artefacts": [{**plain, "component": value}]})
-            self.assertEqual(raised.exception.code, code)
-        listed = {**plain, "component": ["ourapps-ae/other", "ourapps-ae/video"]}
-        for artefacts in ([listed, {**plain, "withoutComponent": "ourapps-ae/video"}], [listed, {**plain, "withoutComponent": "ourapps-ae/other"}]):
-            with self.subTest(artefacts=artefacts), self.assertRaises(AepmError) as raised:
-                validate_component({**c, "artefacts": artefacts})
-            self.assertEqual(raised.exception.code, "duplicate-value")
-
-    def test_artefact_without_component_condition_and_shared_destination(self):
-        plain = self.component["artefacts"][0]
-        c = copy.deepcopy(self.component)
-        c["artefacts"] = [{**plain, "component": "ourapps-ae/video"}, {**plain, "withoutComponent": "ourapps-ae/video"}]
-        self.assertEqual(len(validate_component(c)["artefacts"]), 2)
-        upper = {**plain, "destination": plain["destination"].upper(), "withoutComponent": "ourapps-ae/video"}
-        self.assertEqual(len(validate_component({**c, "artefacts": [c["artefacts"][0], upper]})["artefacts"]), 2)
+        for value in ("video", ["video", "lessons"]):
+            pair = [{**plain, "component": value}, {**plain, "withoutComponent": value}]
+            self.assertEqual(len(validate_component({**c, "artefacts": pair})["artefacts"]), 2)
+        mirrored = [{**plain, "component": ["video", "lessons"]}, {**plain, "withoutComponent": ["lessons", "video"]}]
+        self.assertEqual(len(validate_component({**c, "artefacts": mirrored})["artefacts"]), 2)
         for artefacts, code in (
                 ([plain, plain], "duplicate-value"),
-                ([{**plain, "component": "ourapps-ae/video"}, {**plain, "component": "ourapps-ae/video"}], "duplicate-value"),
-                ([{**plain, "component": "ourapps-ae/video"}, {**plain, "withoutComponent": "ourapps-ae/audio"}], "duplicate-value"),
-                ([{**plain, "component": "ourapps-ae/video"}, plain], "duplicate-value"),
-                ([{**plain, "component": "ourapps-ae/video"}, {**plain, "withoutComponent": "ourapps-ae/video"},
-                  {**plain, "withoutComponent": "ourapps-ae/video"}], "duplicate-value"),
-                ([{**plain, "component": "ourapps-ae/video", "withoutComponent": "ourapps-ae/video"}], "artefact-condition"),
-                ([{**plain, "withoutComponent": "ourapps-ae/sample"}], "artefact-self-component"),
-                ([{**plain, "withoutComponent": "other/name"}], "invalid-name")):
+                ([{**plain, "component": "video"}, {**plain, "component": "video"}], "duplicate-value"),
+                ([{**plain, "component": "video"}, {**plain, "withoutComponent": "audio"}], "duplicate-value"),
+                ([{**plain, "component": ["video", "lessons"]}, {**plain, "withoutComponent": "video"}], "duplicate-value"),
+                ([{**plain, "component": "video"}, plain], "duplicate-value"),
+                ([{**plain, "component": "video"}, {**plain, "withoutComponent": "video"},
+                  {**plain, "withoutComponent": "video"}], "duplicate-value"),
+                ([{**plain, "component": "video", "withoutComponent": "video"}], "artefact-condition")):
             with self.subTest(artefacts=artefacts), self.assertRaises(AepmError) as raised:
                 validate_component({**c, "artefacts": artefacts})
             self.assertEqual(raised.exception.code, code)
 
     def test_artefact_component_is_bound_into_the_package_digest(self):
         plain = pack(self.source, self.store)
-        self.component["artefacts"][0]["component"] = "ourapps-ae/other"
+        self.component["artefacts"][0]["component"] = "other"
         self.update()
         other = self.root / "other-store"
         marked = pack(self.source, other)
         self.assertNotEqual(plain["digest"], marked["digest"])
-        self.assertIn(b'"component":"ourapps-ae/other"', canonical(read_package(marked, other)[0]))
+        self.assertIn(b'"component":"other"', canonical(read_package(marked, other)[0]))
 
     def test_invalid_prerequisite_rejected_before_pack_writes(self):
         self.component["verification"][0]["requirements"] = ["native"]
@@ -676,6 +674,7 @@ class CoreTests(unittest.TestCase):
 
     def test_recipe_review_excludes_application_suites(self):
         self.component["kind"] = "recipe"
+        self.component["artefacts"][0]["destination"] = "run.sh"
         application_suite = {**self.component["verification"][0], "id": "application", "root": "application"}
         self.component["verification"].append(application_suite)
         self.update()

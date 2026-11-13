@@ -62,6 +62,7 @@ class BillOfMaterialsTests(unittest.TestCase):
 
     def test_recipe_is_an_application_in_the_recipe_repository(self):
         self.component["kind"] = "recipe"
+        self.component["artefacts"][0]["destination"] = "run.sh"
         self.component["dependencies"] = []
         self.component["identity"]["version"] = "0.2.0"
         (self.root / "sample" / "component.json").write_bytes(canonical(self.component))
