@@ -125,7 +125,8 @@ def fetch(store: Path, packages: list[tuple[str, str]], *, with_dependencies: bo
         component, payloads = read_package({"name": package, "version": number, "digest": result["digest"]}, store)
         needed = [(item["name"], item["version"]) for item in component["dependencies"]]
         if component["kind"] == "recipe" and "recipe.json" in payloads:
-            needed += [(item["name"], item["version"]) for item in loads(payloads["recipe.json"], "recipe.json")["components"]]
+            from .recipe import World
+            needed += [key for key in World(loads(payloads["recipe.json"], "recipe.json"), component, {}).wanted() if key[1] is not None]
         pending.extend(item for item in needed if item not in done)
     return results
 

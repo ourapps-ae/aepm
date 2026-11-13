@@ -91,6 +91,30 @@ class FetchTests(unittest.TestCase):
         self.assertEqual(sorted(e["name"] for e in json.loads((self.store / "catalogue.json").read_text())["entries"]),
                          ["ourapps-ae/leaf", "ourapps-ae/sample"])
 
+    def test_recipe_dependencies_follow_slots_and_job_candidates(self):
+        from aepm.io import write
+        recipe_root = self.root / "game"
+        manifest = fixture(recipe_root, "game")
+        manifest["kind"] = "recipe"
+        manifest["artefacts"][0]["destination"] = "run.sh"
+        write(recipe_root / "recipe.json", {"name": "ourapps-ae/game", "version": "0.1.0", "components": [
+            {"id": "sample", "class": {"provides": [], "requires": [], "configuration": {}},
+             "preferred": {"name": "ourapps-ae/sample", "version": "0.1.0"}, "configuration": {}, "includedWhen": None}],
+            "jobs": [{"id": "job", "slot": "sample", "candidates": [
+                {"component": "ourapps-ae/sample", "profile": "any"},
+                {"component": "ourapps-ae/leaf", "version": "0.1.0", "profile": "any"}]}]})
+        manifest["files"].append({"path": "recipe.json", "executable": False})
+        manifest["files"].sort(key=lambda item: item["path"])
+        (recipe_root / "component.json").write_bytes(canonical(manifest))
+        game = pack(recipe_root, self.source)
+        short = "game"
+        Catalogue.routes[f"/api/components/{short}/0.1.0"] = None
+        Catalogue.routes[f"/api/recipes/{short}/0.1.0"] = {"name": game["name"], "version": "0.1.0", "digest": "sha256:" + game["digest"]}
+        Catalogue.routes[f"/api/recipes/{short}/0.1.0/bundle"] = {"digest": "sha256:" + game["digest"], "url": f"{self.origin}/dl/{short}"}
+        Catalogue.routes[f"/dl/{short}"] = (self.source / "objects" / (game["digest"] + ".tar")).read_bytes()
+        results = fetch(self.store, [("ourapps-ae/game", "0.1.0")], with_dependencies=True, origin=self.origin)
+        self.assertEqual([item["name"] for item in results], ["ourapps-ae/game", "ourapps-ae/sample", "ourapps-ae/leaf"])
+
     def test_digest_mismatch_and_unknown_are_refused(self):
         leaf_bytes = (self.source / "objects" / (self.leaf["digest"] + ".tar")).read_bytes()
         self.publish(self.sample, served=leaf_bytes)
