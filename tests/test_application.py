@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from aepm import update
 from aepm.__main__ import main
-from aepm.application import assemble, configuration, read_assembly, requirements, substitute, validate_definition
+from aepm.application import assemble, configuration, installed_artefacts, read_assembly, requirements, substitute, validate_definition
 from aepm.bundle import pack, read_package, resolve
 from aepm.export import export_design
 from aepm.io import load, snapshot, write
@@ -521,6 +521,19 @@ class ApplicationTests(unittest.TestCase):
                 installed = self.install()
                 self.assertNotIn(entries[-1][0], self.owned(installed))
                 shutil.rmtree(self.root / "installed")
+
+    def test_listed_components_install_only_when_all_are_present(self):
+        both = ["ourapps-ae/sample", "ourapps-ae/absent"]
+        manifest = {"artefacts": [{"destination": "plain"}, {"destination": "both", "component": both},
+                                  {"destination": "one", "component": "ourapps-ae/sample"}]}
+        for present, expected in (({"ourapps-ae/sample", "ourapps-ae/absent"}, ["plain", "both", "one"]),
+                                  ({"ourapps-ae/sample"}, ["plain", "one"]), (set(), ["plain"])):
+            with self.subTest(present=present):
+                self.assertEqual([item["destination"] for item in installed_artefacts(manifest, present)], expected)
+        self.conditional_recipe([("both.txt", both), ("one.txt", "ourapps-ae/sample")])
+        installed = self.install()
+        self.assertEqual(self.owned(installed), ["app.txt", "components/sample/value.txt", "one.txt"])
+        self.assertEqual(read_assembly(self.root / "installed"), installed)
 
     def test_update_stages_conditional_artefact_when_component_is_present(self):
         self.conditional_recipe([("optional.txt", "ourapps-ae/sample")])

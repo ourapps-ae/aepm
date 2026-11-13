@@ -441,8 +441,15 @@ def validate_component(value: object) -> Component:
         fields(item, "source destination template executable", "artefacts", "component withoutComponent")
         if "component" in item and "withoutComponent" in item:
             fail("artefact-condition", "artefacts")
-        for condition in ("component", "withoutComponent"):
-            if condition in item and name(item[condition], "artefacts." + condition) == identity["name"]:
+        if type(item.get("component")) is list:
+            # A list of two or more names: installed only when every one of them is in the design.
+            if len(item["component"]) < 2 or len(set(map(str, item["component"]))) != len(item["component"]):
+                fail("artefact-condition", "artefacts.component")
+            conditions = [("component", value) for value in item["component"]]
+        else:
+            conditions = [(key, item[key]) for key in ("component", "withoutComponent") if key in item]
+        for condition, value in conditions:
+            if name(value, "artefacts." + condition) == identity["name"]:
                 fail("artefact-self-component", "artefacts." + condition)
         required_paths.append(item["source"])
         safe_path(item["destination"], "artefacts.destination")
@@ -459,6 +466,8 @@ def validate_component(value: object) -> Component:
         # One destination is shared only by the two sides of one condition: `component: X` and `withoutComponent: X`.
         if len(items) == 1:
             continue
+        if any(type(item.get("component")) is list for item in items):
+            fail("duplicate-value", "artefacts")
         sides = sorted((key, item[key]) for item in items for key in ("component", "withoutComponent") if key in item)
         if len(items) != 2 or len(sides) != 2 or sides[0][0] == sides[1][0] or sides[0][1] != sides[1][1]:
             fail("duplicate-value", "artefacts")

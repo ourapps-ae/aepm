@@ -70,10 +70,12 @@ def present_components(definition):
 
 
 def installed_artefacts(manifest, present):
-    """Unconditional artefacts, those whose `component` is in the design and those whose `withoutComponent` is not."""
+    """Unconditional artefacts, those whose `component` (one name, or a list whose names are all) is in the design and those
+    whose `withoutComponent` is not."""
+    def wanted(value):
+        return value is None or all(item in present for item in ([value] if isinstance(value, str) else value))
     return [item for item in manifest["artefacts"]
-            if ("component" not in item or item["component"] in present)
-            and ("withoutComponent" not in item or item["withoutComponent"] not in present)]
+            if wanted(item.get("component")) and ("withoutComponent" not in item or item["withoutComponent"] not in present)]
 
 
 def configuration(declarations, supplied):

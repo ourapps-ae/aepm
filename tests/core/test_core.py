@@ -337,6 +337,23 @@ class CoreTests(unittest.TestCase):
             validate_component(c)
         self.assertEqual(raised.exception.code, "artefact-self-component")
 
+    def test_artefact_component_list_condition(self):
+        plain = self.component["artefacts"][0]
+        c = copy.deepcopy(self.component)
+        c["artefacts"][0] = {**plain, "component": ["ourapps-ae/other", "ourapps-ae/video"]}
+        self.assertEqual(validate_component(c)["artefacts"][0]["component"], ["ourapps-ae/other", "ourapps-ae/video"])
+        for value, code in ((["ourapps-ae/other"], "artefact-condition"), (["ourapps-ae/other", "ourapps-ae/other"], "artefact-condition"),
+                            (["ourapps-ae/other", "ourapps-ae/sample"], "artefact-self-component"), (["ourapps-ae/other", "Upper"], "invalid-name"),
+                            (["ourapps-ae/other", 1], "invalid-name")):
+            with self.subTest(value=value), self.assertRaises(AepmError) as raised:
+                validate_component({**c, "artefacts": [{**plain, "component": value}]})
+            self.assertEqual(raised.exception.code, code)
+        listed = {**plain, "component": ["ourapps-ae/other", "ourapps-ae/video"]}
+        for artefacts in ([listed, {**plain, "withoutComponent": "ourapps-ae/video"}], [listed, {**plain, "withoutComponent": "ourapps-ae/other"}]):
+            with self.subTest(artefacts=artefacts), self.assertRaises(AepmError) as raised:
+                validate_component({**c, "artefacts": artefacts})
+            self.assertEqual(raised.exception.code, "duplicate-value")
+
     def test_artefact_without_component_condition_and_shared_destination(self):
         plain = self.component["artefacts"][0]
         c = copy.deepcopy(self.component)
