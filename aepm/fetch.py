@@ -9,6 +9,7 @@ import urllib.parse
 import urllib.request
 
 from .bundle import add_archive, read_package
+from .evidence import evidence_paths, unpack_evidence
 from .io import write
 from .model import PackageRef, canonical, digest, fail, guarded, loads, name, sha256, version
 
@@ -102,6 +103,12 @@ def fetch_one(store: Path, package: str, number: str, *, origin: str = CATALOGUE
             data = canonical(value)
             if data != report:
                 fail("invalid-report", "review")
+            if evidence_paths(value):
+                archive = _get(f"{base}.evidence.tar", LIMIT)
+                if archive is None:
+                    fail("evidence-missing", f"{short}-{number}.evidence.tar")
+                unpack_evidence(Path(store), value, archive)
+                fetched.append("evidence")
             write(Path(store) / "reports" / (digest(data) + ".json"), value)
             fetched.append("review")
     return {"name": package, "version": number, "digest": expected, "kind": component["kind"], "assets": fetched}

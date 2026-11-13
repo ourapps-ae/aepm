@@ -136,3 +136,77 @@ class FetchTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FetchInstallTests(unittest.TestCase):
+    """A reviewed format-2 recipe published with its evidence archive installs and verifies after fetch alone."""
+
+    def test_fetch_install_and_verify_with_published_evidence(self):
+        from aepm.application import assemble, requirements
+        from aepm.bundle import resolve
+        from aepm.evidence import evidence_paths, pack_evidence
+        from aepm.io import load, write
+        from aepm.test_identities import generate
+        from aepm.trust import publish_release, publish_review
+        from aepm.verification import review_package, verify_application
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name).resolve()
+        from tests.test_application import source as recipe_source
+        manifest = recipe_source(root / "game", "game", recipe=True)
+        manifest["format"] = 2
+        manifest["verification"] = [suite for suite in manifest["verification"] if suite["root"] == "package"]
+        for suite in manifest["verification"]:
+            suite["requirements"] = []
+            suite["execution"] = {"kind": "local", "simulation": False, "operations": [], "settings": [], "secrets": [],
+                                  "resources": [], "assertions": [], "cleanup": None}
+        (root / "game" / "component.json").write_bytes(canonical(manifest))
+        source = root / "source-store"
+        ref = pack(root / "game", source)
+        policy = generate(root / "identities")
+        trusted = load(policy)
+        trusted["trustedExecution"] = [ref["digest"]]
+        write(policy, trusted)
+        publish_release(source, ref, root / "identities/release.pem")
+        report = review_package(ref, source, policy, True)
+        self.assertEqual((report["format"], report["summary"]["required-local"]), (2, "passed"))
+        publish_review(source, ref, report, root / "identities/guardian.pem")
+        paths = evidence_paths(report)
+        self.assertIn(f"execution-evidence/{report['execution']['evidenceDigest']}.json", paths)
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Catalogue)
+        origin = f"http://127.0.0.1:{server.server_port}"
+        statements = source / "statements" / ref["digest"]
+        assets = "/gh/ourapps-ae/game-recipe/releases/download/v0.1.0/game-0.1.0"
+        Catalogue.routes = {
+            "/api/recipes/game/0.1.0": {"name": ref["name"], "version": "0.1.0", "digest": "sha256:" + ref["digest"],
+                                        "source": {"repository": "ourapps-ae/game-recipe", "tag": "v0.1.0"}},
+            "/api/recipes/game/0.1.0/bundle": {"digest": "sha256:" + ref["digest"], "url": origin + "/dl/game"},
+            "/dl/game": (source / "objects" / (ref["digest"] + ".tar")).read_bytes(),
+            assets + ".release.dsse.json": (statements / "release.dsse.json").read_bytes(),
+            assets + ".guardian.dsse.json": (statements / "guardian.dsse.json").read_bytes(),
+            assets + ".review.json": canonical(report)}
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        store = root / "store"
+        with self.assertRaisesRegex(AepmError, "evidence-missing"):
+            fetch(store, [("ourapps-ae/game", "0.1.0")], origin=origin, assets=origin + "/gh")
+        evidence = pack_evidence(source, report)
+        tampered = evidence.replace(b'"format":1', b'"format":9', 1)
+        Catalogue.routes[assets + ".evidence.tar"] = tampered
+        with self.assertRaisesRegex(AepmError, "evidence-digest"):
+            fetch(root / "store-tampered", [("ourapps-ae/game", "0.1.0")], origin=origin, assets=origin + "/gh")
+        Catalogue.routes[assets + ".evidence.tar"] = evidence
+        results = fetch(store, [("ourapps-ae/game", "0.1.0")], origin=origin, assets=origin + "/gh")
+        self.assertEqual(results[0]["assets"], ["release", "guardian", "evidence", "review"])
+        for path in paths:
+            self.assertEqual((store / path).read_bytes(), (source / path).read_bytes())
+
+        definition = {"format": 1, "id": "game", "title": "Game", "recipe": {"name": ref["name"], "version": "0.1.0"},
+                      "components": [], "configuration": {}, "design": {"definitions": [], "instances": [], "connections": []},
+                      "updatePolicy": "patch"}
+        lock = resolve(requirements(definition), store / "catalogue.json", "game", digest(canonical(definition)))
+        app = root / "app"
+        assemble(definition, lock, store, app, policy)
+        self.assertEqual(verify_application(app, policy, True)["summary"]["required-local"], "passed")
